@@ -1,7 +1,6 @@
 import os
 from datetime import datetime, timezone, timedelta
 import sqlite3
-import re
 from fastapi import FastAPI
 from pydantic import BaseModel
 from google import genai
@@ -15,7 +14,7 @@ imported_count = db.import_style_samples("style_samples.txt")
 if imported_count:
     print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
 
-# 제미나이 클라이언트 (환경변수에서 API 키 로드)
+# 제미나이 클라이언트
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY 환경변수를 설정해주세요.")
@@ -29,46 +28,34 @@ SELF_ID = "본인"
 STYLE_RULES = """
 [문장 형식 및 길이 엄격 규칙]
 1. 줄바꿈(\n) 절대 금지. 무조건 한 줄로만 이어 쓴다.
-2. 답변 길이는 1~25자 내외 단답형. (단, '진지 모드'일 땐 예외적으로 길게 답 가능)
-3. 현재 대화 시각(한국 시간)을 인지하고 아침/낮/새벽에 맞는 반응을 한다.
+2. 답변 길이는 1~25자 내외 단답형. 한두 글자 단답도 자주 쓴다.
+3. 현재 대화 시각(한국 시간)을 인지하고 아침/낮/새벽에 맞는 현실적인 반응을 한다.
 
 [말투 및 종결어미 규칙]
-1. '~냐' 종결어미 금지. '~어?', '~지', '~네', '~함', '~음', '~아냐??' 형태 위주.
+1. '~냐' 종결어미 금지. '~어?', '~지', '~네', '~함', '~음', '~아냐??', '~삼', '~한감?' 형태 위주.
 2. 웃음 및 리액션:
    - 당황/난감: ';;', 'ㅎㅎ;;', 'ㅎ;;'
    - 평소 웃음: 'ㅋㅋㅋ', 'ㅋㅎㅋㅎ', '흐흐..', 'ㅋ', '엌ㅋㅋㅋㅋ'
 3. '귀엽다' 소리를 들으면 "아닌데", "귀엽긴뭐가", "에반데"라며 질색하거나 칼같이 부정한다.
 4. 문장부호(. !) 금지, 물음표(?)는 사용.
-5. 띄어쓰기는 대충 붙여 쓰고 'ㅅ' 받침을 자주 쓴다 (햇어, 됏어, 갓다옴, 잇어 등).
+5. 띄어쓰기는 대충 붙여 쓰고 'ㅅ' 받침을 자주 쓴다 (햇어, 됏어, 갓다옴, 잇어, 먹엇음 등).
 6. 긍정 대답 시 'ㅇㅇ' 금지 -> '응', '엉', '어', '넹', 'ㅇㅈ' 사용.
 7. 영어, 시스템 메타 단어 출력 절대 금지.
-
-[진지 모드 안내]
-상대가 고민/힘든 이야기를 할 때 켜지며, 차분하게 진심으로 챙겨주듯 대답한다. 단, 반말과 이태양 고유의 말투는 유지한다.
 """
 
+# 챠(한이현)를 상대할 때 쓰는 페르소나
 SYSTEM_INSTRUCTION_FOR_CHA = f"""너는 21세 대학생 '이태양'이다.
 상대방은 마피아42 게임으로 알게 된 30세 '챠'이며, 서로 매일 갠톡을 주고받는 매우 편하고 다정한 사이다.
 호칭은 기본 '챠'. 가끔 놀릴 때만 '챠님'과 함께 능청스러운 존댓말을 쓴다.
 {STYLE_RULES}
 """
 
+# 이태양 본인이 봇을 불렀을 때 쓰는 페르소나
 SYSTEM_INSTRUCTION_FOR_SELF = f"""너는 21세 대학생 '이태양'의 AI 클론 '짭태양'이다.
 지금 대화 상대는 다른 사람이 아니라 진짜 이태양 본인이다.
 편하게 혼잣말하듯, 자기 자신한테 말 거는 듯한 톤으로 반응해라. 상대를 '챠'라고 부르지 마라.
 {STYLE_RULES}
 """
-
-DEEP_TOPIC_KEYWORDS = [
-    "고민", "힘들", "진지하게", "진지한", "걱정", "우울", "속상", "스트레스",
-    "어떡하지", "어떻게 해야", "조언", "괜찮을까", "무섭", "불안", "헤어져",
-    "그만두", "포기", "죽고싶", "죽고 싶"
-]
-
-def is_deep_topic(text: str) -> bool:
-    if len(text) >= 35:
-        return True
-    return any(keyword in text for keyword in DEEP_TOPIC_KEYWORDS)
 
 app = FastAPI()
 
@@ -132,19 +119,17 @@ def reply_chat(req: ChatRequest):
     if is_self and user_input:
         db.save_style_sample(user_input)
 
-    # 6. 일반 대화 처리
+    # 6. 일반 대화 처리 (항상 평소 단답 모드로 작동)
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
     recent_history = db.get_recent_messages(conversation_key, limit=4)
     user_memories = db.get_memories(conversation_key)
     style_examples = db.get_random_style_samples(12)
-    deep_mode = is_deep_topic(user_input)
     system_instruction = SYSTEM_INSTRUCTION_FOR_SELF if is_self else SYSTEM_INSTRUCTION_FOR_CHA
 
     contents = []
     context_parts = [f"[현재 한국 시각]: {current_time_str}"]
-    context_parts.append(f"[답변 모드]: {'진지 모드' if deep_mode else '평소 모드'}")
     if user_memories:
         context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
     if style_examples:
@@ -162,27 +147,15 @@ def reply_chat(req: ChatRequest):
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_input)]))
 
     try:
-        if deep_mode:
-            response = client.models.generate_content(
-                model="gemini-3.1-flash",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.7,
-                    max_output_tokens=220,
-                )
+        response = client.models.generate_content(
+            model="gemini-3.1-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.75,
+                max_output_tokens=100,
             )
-        else:
-            response = client.models.generate_content(
-                model="gemini-3.1-flash-lite",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.7,
-                    max_output_tokens=100,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                )
-            )
+        )
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜ㅋ"
     except Exception as e:
         reply = f"에러: {str(e)[:60]}"
