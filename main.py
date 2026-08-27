@@ -46,38 +46,51 @@ def reply_chat(req: ChatRequest):
 
         # /짭태양 리셋 / /짭태양 초기화
         if cmd_body in ["리셋", "초기화"]:
-            conn = sqlite3.connect("taeyang.db")
-            cur = conn.cursor()
-            cur.execute("DELETE FROM messages")
-            conn.commit()
-            conn.close()
-            return {"reply": "대화기록초기화완료"}
+            try:
+                conn = sqlite3.connect("taeyang.db")
+                cur = conn.cursor()
+                cur.execute("DELETE FROM messages")
+                conn.commit()
+                conn.close()
+                return {"reply": "대화기록초기화완료"}
+            except Exception as e:
+                return {"reply": f"에러: {str(e)[:30]}"}
 
-        # /짭태양 기억목록
+        # /짭태양 기억목록 / /짭태양 기억 목록
         if cmd_body in ["기억목록", "기억 목록", "기억리스트"]:
-            rows = db.get_memories_with_id(USER_ID)
-            if not rows:
-                return {"reply": "기억된 정보가 없어"}
-            list_str = " | ".join([f"[{r[0]}] {r[1]}" for r in rows])
-            return {"reply": list_str}
+            try:
+                rows = db.get_memories_with_id(USER_ID)
+                if not rows:
+                    return {"reply": "기억된 정보가 없어"}
+                items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
+                list_str = " | ".join(items)
+                return {"reply": list_str}
+            except Exception as e:
+                return {"reply": f"목록조회에러: {str(e)[:30]}"}
 
         # /짭태양 기억삭제 [번호]
         if cmd_body.startswith("기억삭제") or cmd_body.startswith("기억 삭제"):
             target = cmd_body.replace("기억삭제", "").replace("기억 삭제", "").strip()
             if target.isdigit():
-                success = db.delete_memory_by_id(USER_ID, int(target))
-                if success:
-                    return {"reply": f"기억삭제완료: [{target}]번"}
-                else:
-                    return {"reply": f"[{target}]번 기억을 찾을 수 없어"}
+                try:
+                    success = db.delete_memory_by_id(USER_ID, int(target))
+                    if success:
+                        return {"reply": f"기억삭제완료: [{target}]번"}
+                    else:
+                        return {"reply": f"[{target}]번 기억을 찾을 수 없어"}
+                except Exception as e:
+                    return {"reply": f"삭제에러: {str(e)[:30]}"}
             return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /짭태양 기억삭제 1)"}
 
         # /짭태양 기억 [내용]
         if cmd_body.startswith("기억"):
             mem_text = re.sub(r"^기억\s*", "", cmd_body).strip()
             if mem_text:
-                db.save_memory(USER_ID, mem_text)
-                return {"reply": f"응기억햇어: {mem_text}"}
+                try:
+                    db.save_memory(USER_ID, mem_text)
+                    return {"reply": f"응기억햇어: {mem_text}"}
+                except Exception as e:
+                    return {"reply": f"저장에러: {str(e)[:30]}"}
 
     # 2. 일반 대화 처리 (@짭태양 호출어 제거)
     user_input = raw_msg.replace("@짭태양", "").strip()
