@@ -118,11 +118,11 @@ def reply_chat(req: ChatRequest):
     if is_self and user_input:
         db.save_style_sample(user_input)
 
-    # 6. 일반 대화 처리
+    # 6. 일반 대화 처리 (최근 대화 10개 반영)
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
-    recent_history = db.get_recent_messages(conversation_key, limit=4)
+    recent_history = db.get_recent_messages(conversation_key, limit=10)
     user_memories = db.get_memories(conversation_key)
     style_examples = db.get_random_style_samples(12)
     system_instruction = SYSTEM_INSTRUCTION_FOR_SELF if is_self else SYSTEM_INSTRUCTION_FOR_CHA
@@ -147,13 +147,11 @@ def reply_chat(req: ChatRequest):
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
+            model="gemini-2.0-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.7,
-                max_output_tokens=100,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                temperature=0.75,
             )
         )
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜ㅋ"
