@@ -68,7 +68,7 @@ def save_memory(user_id: str, memory_text: str):
     conn.close()
 
 def get_memories(user_id: str):
-    """해당 유저에 대한 모든 기억 불러오기"""
+    """해당 유저에 대한 모든 기억 불러오기 (텍스트 리스트)"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute(
@@ -78,6 +78,31 @@ def get_memories(user_id: str):
     rows = cursor.fetchall()
     conn.close()
     return [r[0] for r in rows]
+
+def get_memories_with_id(user_id: str):
+    """해당 유저의 기억 번호(ID)와 내용 함께 불러오기"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, memory_text FROM memories WHERE user_id = ? ORDER BY id ASC",
+        (user_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def delete_memory_by_id(user_id: str, memory_id: int):
+    """특정 번호의 기억 삭제"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM memories WHERE user_id = ? AND id = ?",
+        (user_id, memory_id)
+    )
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
 
 # DB 초기 세팅 실행
 init_db()
