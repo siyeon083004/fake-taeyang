@@ -29,6 +29,64 @@ def init_db():
         )
     """)
 
+    # 3. 말투 학습용 예시 문장 테이블 (실제 카톡 대화에서 추출한 이태양 발화)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS style_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message TEXT UNIQUE
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def import_style_samples(filepath: str = "style_samples.txt"):
+    """
+    style_samples.txt(한 줄에 문장 하나씩)를 읽어서 style_samples 테이블에 채워넣는다.
+    이미 데이터가 들어있으면 다시 넣지 않는다 (서버 재시작할 때마다 중복 삽입 방지).
+    """
+    import os
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM style_samples")
+    count = cursor.fetchone()[0]
+
+    if count > 0:
+        conn.close()
+        return count
+
+    if not os.path.exists(filepath):
+        conn.close()
+        return 0
+
+    with open(filepath, encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    cursor.executemany(
+        "INSERT OR IGNORE INTO style_samples (message) VALUES (?)",
+        [(line,) for line in lines]
+    )
+    conn.commit()
+    conn.close()
+    return len(lines)
+
+
+def get_random_style_samples(n: int = 12):
+    """말투 예시 문장을 랜덤으로 n개 뽑아온다."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT message FROM style_samples ORDER BY RANDOM() LIMIT ?", (n,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def save_style_sample(text: str):
+    """이태양이 실제로 오늘 한 말을 말투 학습 데이터로 추가한다 (/말투 명령어용)."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO style_samples (message) VALUES (?)", (text,))
     conn.commit()
     conn.close()
 
