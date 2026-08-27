@@ -147,12 +147,13 @@ def reply_chat(req: ChatRequest):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.1-flash-lite",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.75,
+                temperature=0.7,
                 max_output_tokens=100,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
         )
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜ㅋ"
