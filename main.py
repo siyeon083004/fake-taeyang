@@ -8,9 +8,10 @@ import database as db
 
 db.init_db()
 
+# 제미나이 클라이언트
 client = genai.Client(api_key="AQ.Ab8RN6Ix1VS_FMCpl36upR9vy-cnFU01KbW_MfuZ_vhud5hePw")
 USER_ID = "챠"
-KST = timezone(timedelta(hours=9)) # 한국 표준시 고정
+KST = timezone(timedelta(hours=9))
 
 SYSTEM_INSTRUCTION = """너는 21세 대학생 '이태양'이다.
 상대방은 마피아42 게임으로 알게 된 30세 '챠'이며, 서로 매일 갠톡을 주고받는 매우 편하고 다정한 사이다.
@@ -33,12 +34,6 @@ SYSTEM_INSTRUCTION = """너는 21세 대학생 '이태양'이다.
 8. 영어, 시스템 메타 단어 출력 절대 금지.
 """
 
-config = types.GenerateContentConfig(
-    system_instruction=SYSTEM_INSTRUCTION,
-    temperature=0.7,
-    max_output_tokens=60,
-)
-
 app = FastAPI()
 
 class ChatRequest(BaseModel):
@@ -49,7 +44,6 @@ class ChatRequest(BaseModel):
 def reply_chat(req: ChatRequest):
     user_input = req.message.replace("@짭태양", "").strip()
 
-    # 리셋 명령어
     if user_input == "/리셋":
         conn = sqlite3.connect("taeyang.db")
         cur = conn.cursor()
@@ -58,13 +52,11 @@ def reply_chat(req: ChatRequest):
         conn.close()
         return {"reply": "대화기록초기화완료"}
 
-    # 기억 명령어
     if user_input.startswith("/기억 "):
         mem_text = user_input.replace("/기억 ", "").strip()
         db.save_memory(USER_ID, mem_text)
         return {"reply": f"응기억햇어: {mem_text}"}
 
-    # 한국 시각 적용
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
@@ -87,11 +79,17 @@ def reply_chat(req: ChatRequest):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash", contents=contents, config=config
+            model="gemini-1.5-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.7,
+                max_output_tokens=80,
+            )
         )
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜그래ㅋ"
     except Exception as e:
-        reply = "어챠왜불러ㅋ"
+        reply = f"에러: {str(e)[:40]}"
 
     db.save_message(USER_ID, USER_ID, user_input)
     db.save_message(USER_ID, "이태양", reply)
