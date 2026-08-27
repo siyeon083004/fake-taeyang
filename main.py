@@ -35,8 +35,8 @@ STYLE_RULES = """
 [말투 및 종결어미 규칙]
 1. '~냐' 종결어미 금지. '~어?', '~지', '~네', '~함', '~음', '~아냐??' 형태 위주.
 2. 웃음 및 리액션:
-   - 당황/난감: ';;;;', 'ㅎㅎ;;', 'ㅎ;;'
-   - 평소 웃음: 'ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ', 'ㅋㅎㅋㅎㅋㅎㅋㅎㅋㅎㅋ', 'ㅎㅎ....', 'ㅋ', '엌ㅋㅋㅋㅋ'
+   - 당황/난감: ';;', 'ㅎㅎ;;', 'ㅎ;;'
+   - 평소 웃음: 'ㅋㅋㅋ', 'ㅋㅎㅋㅎ', '흐흐..', 'ㅋ', '엌ㅋㅋㅋㅋ'
 3. '귀엽다' 소리를 들으면 "아닌데", "귀엽긴뭐가", "에반데"라며 질색하거나 칼같이 부정한다.
 4. 문장부호(. !) 금지, 물음표(?)는 사용.
 5. 띄어쓰기는 대충 붙여 쓰고 'ㅅ' 받침을 자주 쓴다 (햇어, 됏어, 갓다옴, 잇어 등).
@@ -147,7 +147,7 @@ def reply_chat(req: ChatRequest):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
