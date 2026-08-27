@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import sqlite3
+import re
 from fastapi import FastAPI
 from pydantic import BaseModel
 from google import genai
@@ -8,30 +9,25 @@ import database as db
 
 db.init_db()
 
-# 구글 제미나이 클라이언트
 client = genai.Client(api_key="AQ.Ab8RN6Ix1VS_FMCpl36upR9vy-cnFU01KbW_MfuZ_vhud5hePw")
 USER_ID = "챠"
 KST = timezone(timedelta(hours=9))
 
-SYSTEM_INSTRUCTION = """너는 21세 대학생 '이태양'이다.
-상대방은 마피아42 게임으로 알게 된 30세 '챠'이며, 서로 매일 갠톡을 주고받는 매우 편하고 다정한 사이다.
+SYSTEM_INSTRUCTION = """너는 21세 여성 '이태양'이다. (절대 남자 아님! 21세 여자!)
+상대방은 30세 '챠'(한이현)이며, 매일 갠톡을 주고받는 매우 편하고 장난스러운 사이다.
 
-[문장 형식 및 길이 엄격 규칙]
-1. 줄바꿈(엔터, \\n)은 절대 치지 마라. 무조건 한 줄로만 이어 써서 보낸다.
-2. 답변 길이를 길게 쓰지 마라. 카톡 한 줄 분량으로 짧게 보낸다.
-3. 현재 대화 시각(시간대)을 정확히 인지하고 아침/낮/저녁/새벽에 맞는 현실적인 반응을 한다 (예: 아침엔 출근/기상, 새벽엔 안자냐고 묻기 등).
+[대화 원칙 및 성격]
+1. 인위적인 신조어나 과장된 밈을 어색하게 욱여넣지 마라.
+2. 예전문장을 그대로 앵무새처럼 돌려막지 말고, 상대방 말의 내용과 뉘앙스에 맞춰 자연스럽게 실시간 반응해라.
+3. 챠가 치대거나 장난치면 적당히 틱틱대며 받아주고, 능청스럽게 넘기거나 딴청을 피우기도 한다.
 
-[말투 및 종결어미 규칙]
-1. '~냐' 종결어미 금지. 친근하고 편안한 '~어?', '~지', '~네', '~함', '~음', '~아냐??' 형태로 대화한다.
-2. 웃음 및 리액션:
-   - 당황/뻘쭘/난감: ';;', 'ㅎㅎ;;', 'ㅎ;;' 자연스럽게 사용.
-   - 평소 웃음: 'ㅋㅋㅋ', 'ㅋㅎㅋㅎ', '흐흐..', 'ㅋ' 등을 상황에 맞게 쓴다.
-3. 호칭은 기본 '챠'. 가끔 놀릴 때만 '챠님'과 함께 능청스러운 존댓말을 쓴다.
-4. '귀엽다' 소리를 들으면 "아닌데", "귀엽긴뭐가", "에반데"라며 질색하거나 칼같이 부정한다.
-5. 문장부호(. !)는 쓰지 않고 물음표(?)는 쓴다.
-6. 띄어쓰기는 적당히 붙여 쓰고 'ㅅ' 받침을 자주 쓴다 (햇어, 됏어, 갓다옴, 먹엇음, 잇어 등).
-7. 긍정 대답 시 'ㅇㅇ' 금지 -> '응', '엉', '어', '넹', 'ㅇㅈ' 사용.
-8. 영어, 시스템 메타 단어 출력 절대 금지.
+[말투 및 텍스트 습관]
+1. 1줄 단답형 카톡 (1~25자 내외). 한두 글자 단답도 자주 씀. 줄바꿈 금지.
+2. 마침표(.)나 느낌표(!) 절대 금지. 물음표(?)는 사용.
+3. 띄어쓰기는 완벽하게 맞추지 않고 자연스럽게 뭉개며 친다.
+4. 'ㅅ' 받침을 편하게 쓴다 (됏어, 햇음, 갓다옴, 잇어 등).
+5. 종결어미는 '~어?', '~지', '~음', '~함', '~네', '~아님?', '~삼', '~한감?' 위주로 쓰며, '~냐'는 쓰지 않는다.
+6. 웃음 패턴: ㅋㅋㅋㅋㅋㅋㅋㅋ 길게, ㅋㅎㅋㅎㅋㅎㅋㅎ 연타, ㅋ, ㅎ;;, 엌ㅋㅋㅋㅋ 등을 상황에 맞게 쓴다.
 """
 
 app = FastAPI()
@@ -42,31 +38,58 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def reply_chat(req: ChatRequest):
-    user_input = req.message.replace("@짭태양", "").strip()
+    raw_msg = req.message.strip()
 
-    # 리셋 명령어
-    if user_input == "/리셋":
-        conn = sqlite3.connect("taeyang.db")
-        cur = conn.cursor()
-        cur.execute("DELETE FROM messages")
-        conn.commit()
-        conn.close()
-        return {"reply": "대화기록초기화완료"}
+    # 1. 슬래시 명령어 전용 처리 (/짭태양)
+    if raw_msg.startswith("/짭태양"):
+        cmd_body = raw_msg.replace("/짭태양", "", 1).strip()
 
-    # 기억 명령어
-    if user_input.startswith("/기억 "):
-        mem_text = user_input.replace("/기억 ", "").strip()
-        db.save_memory(USER_ID, mem_text)
-        return {"reply": f"응기억햇어: {mem_text}"}
+        # /짭태양 리셋 / /짭태양 초기화
+        if cmd_body in ["리셋", "초기화"]:
+            conn = sqlite3.connect("taeyang.db")
+            cur = conn.cursor()
+            cur.execute("DELETE FROM messages")
+            conn.commit()
+            conn.close()
+            return {"reply": "대화기록초기화완료"}
 
-    # 한국 시각 및 컨텍스트
+        # /짭태양 기억목록
+        if cmd_body in ["기억목록", "기억 목록", "기억리스트"]:
+            rows = db.get_memories_with_id(USER_ID)
+            if not rows:
+                return {"reply": "기억된 정보가 없어"}
+            list_str = " | ".join([f"[{r[0]}] {r[1]}" for r in rows])
+            return {"reply": list_str}
+
+        # /짭태양 기억삭제 [번호]
+        if cmd_body.startswith("기억삭제") or cmd_body.startswith("기억 삭제"):
+            target = cmd_body.replace("기억삭제", "").replace("기억 삭제", "").strip()
+            if target.isdigit():
+                success = db.delete_memory_by_id(USER_ID, int(target))
+                if success:
+                    return {"reply": f"기억삭제완료: [{target}]번"}
+                else:
+                    return {"reply": f"[{target}]번 기억을 찾을 수 없어"}
+            return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /짭태양 기억삭제 1)"}
+
+        # /짭태양 기억 [내용]
+        if cmd_body.startswith("기억"):
+            mem_text = re.sub(r"^기억\s*", "", cmd_body).strip()
+            if mem_text:
+                db.save_memory(USER_ID, mem_text)
+                return {"reply": f"응기억햇어: {mem_text}"}
+
+    # 2. 일반 대화 처리 (@짭태양 호출어 제거)
+    user_input = raw_msg.replace("@짭태양", "").strip()
+    if not user_input:
+        user_input = "어왜"
+
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
     recent_history = db.get_recent_messages(USER_ID, limit=4)
     user_memories = db.get_memories(USER_ID)
 
-    # 대화 히스토리 구성
     history_contents = []
     context_parts = [f"[현재 한국 시각]: {current_time_str}"]
     if user_memories:
@@ -85,11 +108,11 @@ def reply_chat(req: ChatRequest):
             history=history_contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.7,
+                temperature=0.75,
             )
         )
         response = chat.send_message(user_input)
-        reply = response.text.replace("\n", " ").strip() if response.text else "어왜그래ㅋ"
+        reply = response.text.replace("\n", " ").strip() if response.text else "어왜ㅋ"
     except Exception as e:
         reply = f"에러: {str(e)[:40]}"
 
