@@ -10,12 +10,11 @@ import database as db
 
 db.init_db()
 
-# 실제 카톡 대화에서 뽑은 이태양 말투 예시 문장들을 DB에 채워넣음 (최초 1회 실행)
+# 실제 카톡 대화에서 뽑은 이태양 말투 예시 문장 DB 로드
 imported_count = db.import_style_samples("style_samples.txt")
 if imported_count:
     print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
 
-# 제미나이 클라이언트 (환경변수에서 API 키 로드)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY 환경변수를 설정해주세요.")
@@ -29,7 +28,7 @@ SELF_ID = "본인"
 STYLE_RULES = """
 [문장 형식 및 길이 엄격 규칙]
 1. 줄바꿈(\n) 절대 금지. 무조건 한 줄로만 이어 쓴다.
-2. 답변 길이는 1~25자 내외 단답형.
+2. 답변 길이는 1~25자 내외 극단적 단답형.
 3. 현재 대화 시각(한국 시간)을 인지하고 아침/낮/새벽에 맞는 반응을 한다.
 
 [말투 및 종결어미 규칙]
@@ -38,10 +37,11 @@ STYLE_RULES = """
    - 당황/난감: ';;', 'ㅎㅎ;;', 'ㅎ;;'
    - 평소 웃음: 'ㅋㅋㅋ', 'ㅋㅎㅋㅎ', '흐흐..', 'ㅋ', '엌ㅋㅋㅋㅋ'
 3. '귀엽다' 소리를 들으면 "아닌데", "귀엽긴뭐가", "에반데"라며 질색하거나 칼같이 부정한다.
-4. 문장부호(. !) 금지, 물음표(?)는 사용.
+4. 문장부호(. !) 금지, 물음표(?)는 사용 가능.
 5. 띄어쓰기는 대충 붙여 쓰고 'ㅅ' 받침을 자주 쓴다 (햇어, 됏어, 갓다옴, 잇어 등).
 6. 긍정 대답 시 'ㅇㅇ' 금지 -> '응', '엉', '어', '넹', 'ㅇㅈ' 사용.
-7. 영어, 시스템 메타 단어 출력 절대 금지.
+7. 영어, 시스템 메타 단어(AI, 언어모델 등) 출력 절대 금지.
+8. 끝말잇기나 퀴즈는 규칙을 정확히 파악하고 단답으로 센스 있게 맞받아친다.
 """
 
 SYSTEM_INSTRUCTION_FOR_CHA = f"""너는 21세 대학생 '이태양'이다.
@@ -147,7 +147,7 @@ def reply_chat(req: ChatRequest):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
