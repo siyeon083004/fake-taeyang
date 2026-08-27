@@ -8,7 +8,7 @@ import database as db
 
 db.init_db()
 
-# 제미나이 클라이언트
+# 구글 제미나이 클라이언트
 client = genai.Client(api_key="AQ.Ab8RN6Ix1VS_FMCpl36upR9vy-cnFU01KbW_MfuZ_vhud5hePw")
 USER_ID = "챠"
 KST = timezone(timedelta(hours=9))
@@ -79,7 +79,7 @@ def reply_chat(req: ChatRequest):
 
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
