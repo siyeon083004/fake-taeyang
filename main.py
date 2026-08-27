@@ -8,7 +8,7 @@ import database as db
 
 db.init_db()
 
-# 제미나이 클라이언트
+# 구글 제미나이 클라이언트
 client = genai.Client(api_key="AQ.Ab8RN6Ix1VS_FMCpl36upR9vy-cnFU01KbW_MfuZ_vhud5hePw")
 USER_ID = "챠"
 KST = timezone(timedelta(hours=9))
@@ -19,7 +19,7 @@ SYSTEM_INSTRUCTION = """너는 21세 대학생 '이태양'이다.
 [문장 형식 및 길이 엄격 규칙]
 1. 줄바꿈(엔터, \\n)은 절대 치지 마라. 무조건 한 줄로만 이어 써서 보낸다.
 2. 답변 길이를 길게 쓰지 마라. 카톡 한 줄 분량으로 짧게 보낸다.
-3. 현재 대화 시각(한국 시간)을 정확히 인지하고 아침/낮/새벽에 맞는 현실적인 반응을 한다.
+3. 현재 대화 시각(시간대)을 정확히 인지하고 아침/낮/저녁/새벽에 맞는 현실적인 반응을 한다 (예: 아침엔 출근/기상, 새벽엔 안자냐고 묻기 등).
 
 [말투 및 종결어미 규칙]
 1. '~냐' 종결어미 금지. 친근하고 편안한 '~어?', '~지', '~네', '~함', '~음', '~아냐??' 형태로 대화한다.
@@ -59,40 +59,39 @@ def reply_chat(req: ChatRequest):
         db.save_memory(USER_ID, mem_text)
         return {"reply": f"응기억햇어: {mem_text}"}
 
-    # 한국 시간 및 컨텍스트
+    # 한국 시각 및 컨텍스트
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
     recent_history = db.get_recent_messages(USER_ID, limit=4)
     user_memories = db.get_memories(USER_ID)
 
-    contents = []
+    # 대화 히스토리 구성
+    history_contents = []
     context_parts = [f"[현재 한국 시각]: {current_time_str}"]
     if user_memories:
         context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
-        
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
-    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어")]))
+
+    history_contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
+    history_contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어")]))
 
     for sender, text in recent_history:
         role = "model" if sender == "이태양" else "user"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
-
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_input)]))
+        history_contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
+        chat = client.chats.create(
+            model="gemini-3.6-flash",
+            history=history_contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.7,
-                max_output_tokens=100,
             )
         )
+        response = chat.send_message(user_input)
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜그래ㅋ"
     except Exception as e:
-        reply = f"에러: {str(e)[:60]}"
+        reply = f"에러: {str(e)[:40]}"
 
     db.save_message(USER_ID, USER_ID, user_input)
     db.save_message(USER_ID, "이태양", reply)
