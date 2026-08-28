@@ -10,12 +10,10 @@ import database as db
 
 db.init_db()
 
-# 실제 카톡 대화에서 뽑은 이태양 말투 예시 문장들을 DB에 채워넣음
 imported_count = db.import_style_samples("style_samples.txt")
 if imported_count:
     print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
 
-# 제미나이 클라이언트
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
@@ -34,6 +32,7 @@ STYLE_RULES = """
 2. 카톡 답장다운 짧은 호흡(1~35자 내외)으로 쓴다.
 3. 현재 대화 시각(한국 시간)을 정확히 인지하고 아침/낮/새벽에 맞는 현실적인 반응을 한다.
 4. 상대방이 방금 한 말의 내용과 맥락을 정확히 파악해서, 엉뚱한 소리 대신 그 말에 실제로 맞는 대답을 해라.
+5. 제공된 [참고할 과거 관련 대화 기록]이 있다면, 해당 사실과 사건을 바탕으로 아는 척 자연스럽게 대답해라.
 
 [말투 및 텍스트 습관]
 1. '~냐' 종결어미 금지. 친근하고 편안한 '~어?', '~지', '~네', '~함', '~음', '~아냐??' 형태로 대화한다.
@@ -178,19 +177,21 @@ def reply_chat(req: ChatRequest):
 
     recent_history = db.get_recent_messages(conversation_key, limit=10)
     user_memories = db.get_memories(conversation_key)
-    
-    if hasattr(db, "get_relevant_style_samples"):
-        style_examples = db.get_relevant_style_samples(user_input, n=12)
-    else:
-        style_examples = db.get_random_style_samples(12)
+    style_examples = db.get_relevant_style_samples(user_input, n=12)
+    knowledge_records = db.search_knowledge(user_input, limit=6)
 
     deep_mode = is_deep_topic(user_input)
 
     contents = []
     context_parts = [f"[현재 한국 시각]: {current_time_str}"]
     context_parts.append(f"[답변 모드]: {'진지 모드' if deep_mode else '평소 모드'}")
+    
     if user_memories:
         context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
+        
+    if knowledge_records:
+        context_parts.append("[참고할 과거 관련 대화 기록]: " + " / ".join(knowledge_records))
+        
     if style_examples:
         context_parts.append(
             "[이태양이 실제로 쓴 말투 예시, 이 느낌으로 대답해]: " + " / ".join(style_examples)
