@@ -1,37 +1,28 @@
 import os
-import re
-import sqlite3
-from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
-import database as db
 
-db.init_db()
-
-# Render 환경변수에서 안전하게 키 로드
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6Ix1VS_FMCpl36upR9vy-cnFU01KbW_MfuZ_vhud5hePw")
+# 1. API 클라이언트 설정 (Render 환경변수의 GEMINI_API_KEY 자동 참조)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-USER_ID = "챠"
-KST = timezone(timedelta(hours=9))
+# 2. T 100% 팩폭 심판관 프롬프트
+JUDGE_INSTRUCTION = """너는 카카오톡 단톡방의 'T 100% 팩폭 심판관'이다.
+사용자가 게임 억까, 가챠 폭망, 일상 징징글, 친구와의 싸움 상황을 가져오면 인정사정없이 냉정하게 판결을 내린다.
 
-SYSTEM_INSTRUCTION = """너는 21세 여성 '이태양'이다. (절대 남자 아님! 21세 여자!)
-상대방은 30세 '챠'(한이현)(여자임)이며, 매일 갠톡을 주고받는 매우 편하고 장난스러운 사이다.
+[답변 스타일]
+1. 감정적 위로나 공감은 절대 하지 않는다.
+2. 억울하다고 징징대도 본인의 판단 미스나 욕심, 똥손을 짚어내어 팩트 폭행을 날린다.
+3. 말투는 능청스럽고 단호한 반말/음슴체 위주로 쓴다. (예: ~임, ~함, ㅉㅉ, 팩트임)
+4. 줄바꿈을 깔끔하게 넣어서 가독성을 높인다.
 
-[대화 원칙 및 성격]
-1. 인위적인 신조어나 과장된 밈을 어색하게 욱여넣지 마라.
-2. 예전문장을 그대로 앵무새처럼 돌려막지 말고, 상대방 말의 내용과 뉘앙스에 맞춰 자연스럽게 실시간 반응해라.
-3. 챠가 치대거나 장난치면 적당히 틱틱대며 받아주고, 능청스럽게 넘기거나 딴청을 피우기도 한다.
-
-[말투 및 텍스트 습관]
-1. 1줄 단답형 카톡 (1~25자 내외). 한두 글자 단답도 자주 씀. 줄바꿈 금지.
-2. 마침표(.)나 느낌표(!) 절대 금지. 물음표(?)는 사용.
-3. 띄어쓰기는 완벽하게 맞추지 않고 자연스럽게 뭉개며 친다.
-4. 'ㅅ' 받침을 편하게 쓴다 (됏어, 햇음, 갓다옴, 잇어 등).
-5. 종결어미는 '~어?', '~지', '~음', '~함', '~네', '~아님?', '~삼', '~한감?' 위주로 쓰며, '~냐'는 쓰지 않는다.
-6. 웃음 패턴: ㅋㅋㅋㅋㅋㅋㅋㅋ 길게, ㅋㅎㅋㅎㅋㅎㅋㅎ 연타, ㅋ, ㅎ;;, 엌ㅋㅋㅋㅋ 등을 상황에 맞게 쓴다.
+[출력 양식 고정]
+⚖️ [심판관 판결문]
+• 사건 요약: (한 줄 요약)
+• 과실 비율: (예: 본인 80% : 세상 억까 20%)
+• 판결: (2~3줄로 냉정하고 타격감 있는 팩폭 일침)
 """
 
 app = FastAPI()
@@ -42,102 +33,34 @@ class ChatRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "judge_online"}
 
 @app.post("/chat")
-def reply_chat(req: ChatRequest):
+def judge_chat(req: ChatRequest):
+    user_name = req.sender.strip() if req.sender.strip() else "고소인"
     raw_msg = req.message.strip()
 
-    # 1. 슬래시 명령어 전용 처리 (/짭태양)
-    if raw_msg.startswith("/짭태양"):
-        cmd_body = raw_msg.replace("/짭태양", "", 1).strip()
+    # 호출어(@심판, @판사, !심판 등) 제거
+    user_input = raw_msg
+    for trigger in ["@심판관", "@심판", "!심판", "@짭태양", "/심판"]:
+        user_input = user_input.replace(trigger, "").strip()
 
-        # /짭태양 리셋 / /짭태양 초기화
-        if cmd_body in ["리셋", "초기화"]:
-            try:
-                conn = sqlite3.connect("taeyang.db")
-                cur = conn.cursor()
-                cur.execute("DELETE FROM messages")
-                conn.commit()
-                conn.close()
-                return {"reply": "대화기록초기화완료"}
-            except Exception as e:
-                return {"reply": f"에러: {str(e)[:30]}"}
-
-        # /짭태양 기억목록
-        if cmd_body in ["기억목록", "기억 목록", "기억리스트"]:
-            try:
-                rows = db.get_memories_with_id(USER_ID)
-                if not rows:
-                    return {"reply": "기억된 정보가 없어"}
-                items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
-                list_str = " | ".join(items)
-                return {"reply": list_str}
-            except Exception as e:
-                return {"reply": f"목록조회에러: {str(e)[:30]}"}
-
-        # /짭태양 기억삭제 [번호]
-        if cmd_body.startswith("기억삭제") or cmd_body.startswith("기억 삭제"):
-            target = cmd_body.replace("기억삭제", "").replace("기억 삭제", "").strip()
-            if target.isdigit():
-                try:
-                    success = db.delete_memory_by_id(USER_ID, int(target))
-                    if success:
-                        return {"reply": f"기억삭제완료: [{target}]번"}
-                    else:
-                        return {"reply": f"[{target}]번 기억을 찾을 수 없어"}
-                except Exception as e:
-                    return {"reply": f"삭제에러: {str(e)[:30]}"}
-            return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /짭태양 기억삭제 1)"}
-
-        # /짭태양 기억 [내용]
-        if cmd_body.startswith("기억"):
-            mem_text = re.sub(r"^기억\s*", "", cmd_body).strip()
-            if mem_text:
-                try:
-                    db.save_memory(USER_ID, mem_text)
-                    return {"reply": f"응기억햇어: {mem_text}"}
-                except Exception as e:
-                    return {"reply": f"저장에러: {str(e)[:30]}"}
-
-    # 2. 일반 대화 처리 (@짭태양 호출어 제거)
-    user_input = raw_msg.replace("@짭태양", "").strip()
     if not user_input:
-        user_input = "어왜"
+        return {"reply": "억울한 상황이나 사연을 말해봐 판결 내려줌"}
 
-    now_kst = datetime.now(KST)
-    current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
-
-    recent_history = db.get_recent_messages(USER_ID, limit=4)
-    user_memories = db.get_memories(USER_ID)
-
-    history_contents = []
-    context_parts = [f"[현재 한국 시각]: {current_time_str}"]
-    if user_memories:
-        context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
-
-    history_contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
-    history_contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어")]))
-
-    for sender, text in recent_history:
-        role = "model" if sender == "이태양" else "user"
-        history_contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+    prompt = f"[사연 접수자]: {user_name}\n[사건 내용]: {user_input}"
 
     try:
-        chat = client.chats.create(
-            model="gemini-3.6-flash",
-            history=history_contents,
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.75,
+                system_instruction=JUDGE_INSTRUCTION,
+                temperature=0.8,
             )
         )
-        response = chat.send_message(user_input)
-        reply = response.text.replace("\n", " ").strip() if response.text else "어왜ㅋ"
+        reply = response.text.strip() if response.text else "증거 불충분으로 기각함"
     except Exception as e:
-        reply = f"에러: {str(e)[:40]}"
-
-    db.save_message(USER_ID, USER_ID, user_input)
-    db.save_message(USER_ID, "이태양", reply)
+        reply = f"판결 실패: {str(e)[:30]}"
 
     return {"reply": reply}
