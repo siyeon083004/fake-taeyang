@@ -11,7 +11,7 @@ import database as db
 db.init_db()
 
 # 실제 카톡 대화에서 추출한 이태양 말투 원본 로드
-imported_count = db.import_style_samples("style_samples.txt")[span_0](start_span)[span_0](end_span)
+imported_count = db.import_style_samples("style_samples.txt")
 if imported_count:
     print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
 
@@ -147,7 +147,7 @@ def reply_chat(req: ChatRequest):
 
     # 2. 기억 목록 확인
     if user_input in ["/기억목록", "/기억 목록"]:
-        rows = db.get_memories_with_id(conversation_key)[span_1](start_span)[span_1](end_span)
+        rows = db.get_memories_with_id(conversation_key)
         if not rows:
             return {"reply": "기억된 정보가 없어"}
         items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
@@ -157,7 +157,7 @@ def reply_chat(req: ChatRequest):
     if user_input.startswith("/기억삭제"):
         target = user_input.replace("/기억삭제", "").strip()
         if target.isdigit():
-            success = db.delete_memory_by_id(conversation_key, int(target))[span_2](start_span)[span_2](end_span)
+            success = db.delete_memory_by_id(conversation_key, int(target))
             return {"reply": f"기억삭제완료: [{target}]번" if success else f"[{target}]번 기억을 찾을 수 없어"}
         return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /기억삭제 1)"}
 
@@ -165,26 +165,26 @@ def reply_chat(req: ChatRequest):
     if user_input.startswith("/기억 "):
         mem_text = user_input.replace("/기억 ", "", 1).strip()
         if mem_text:
-            db.save_memory(conversation_key, mem_text)[span_3](start_span)[span_3](end_span)
+            db.save_memory(conversation_key, mem_text)
             return {"reply": f"응기억햇어: {mem_text}"}
 
     # 5. 말투 학습 명령어
     if user_input.startswith("/말투 "):
         style_text = user_input.replace("/말투 ", "", 1).strip()
         if style_text:
-            db.save_style_sample(style_text)[span_4](start_span)[span_4](end_span)
+            db.save_style_sample(style_text)
             return {"reply": f"응 이것도 배웟어: {style_text}"}
 
     # 자동 말투 학습
     if is_self and is_meaningful_style_sample(user_input):
-        db.save_style_sample(user_input)[span_5](start_span)[span_5](end_span)
+        db.save_style_sample(user_input)
 
     # 컨텍스트 조립
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
-    recent_history = db.get_recent_messages(conversation_key, limit=10)[span_6](start_span)[span_6](end_span)
-    user_memories = db.get_memories(conversation_key)[span_7](start_span)[span_7](end_span)
+    recent_history = db.get_recent_messages(conversation_key, limit=10)
+    user_memories = db.get_memories(conversation_key)
     
     style_examples = db.get_relevant_style_samples(user_input, n=12)
     knowledge_records = db.search_knowledge(user_input, limit=6)
@@ -231,7 +231,7 @@ def reply_chat(req: ChatRequest):
         print(f"[Gemini 에러 상세] {e}")
         reply = f"에러: {str(e)[:60]}"
 
-    db.save_message(conversation_key, conversation_key, user_input)[span_8](start_span)[span_8](end_span)
-    db.save_message(conversation_key, "이태양", reply)[span_9](start_span)[span_9](end_span)
+    db.save_message(conversation_key, conversation_key, user_input)
+    db.save_message(conversation_key, "이태양", reply)
 
     return {"reply": reply}
