@@ -10,8 +10,8 @@ import database as db
 
 db.init_db()
 
-# 실제 카톡 대화에서 뽑은 이태양 말투 예시 문장들을 DB에 채워넣음 (최초 1회만 실행됨)[cite: 8]
-imported_count = db.import_style_samples("style_samples.txt")[cite: 8]
+# 실제 카톡 대화에서 뽑은 이태양 말투 예시 문장들을 DB에 채워넣음 (최초 1회만 실행됨)
+imported_count = db.import_style_samples("style_samples.txt")
 if imported_count:
     print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
 
@@ -23,7 +23,6 @@ if not GEMINI_API_KEY:
 client = genai.Client(api_key=GEMINI_API_KEY)
 KST = timezone(timedelta(hours=9))
 
-# 추론 기능이 지원되는 정규 Flash 모델
 MODEL_NAME = "gemini-2.5-flash"
 
 SELF_NAME_KEYWORD = "이태양"
@@ -141,7 +140,7 @@ def reply_chat(req: ChatRequest):
 
     # 2. 기억 목록 확인
     if user_input in ["/기억목록", "/기억 목록"]:
-        rows = db.get_memories_with_id(conversation_key)[cite: 8]
+        rows = db.get_memories_with_id(conversation_key)
         if not rows:
             return {"reply": "기억된 정보가 없어"}
         items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
@@ -151,7 +150,7 @@ def reply_chat(req: ChatRequest):
     if user_input.startswith("/기억삭제"):
         target = user_input.replace("/기억삭제", "").strip()
         if target.isdigit():
-            success = db.delete_memory_by_id(conversation_key, int(target))[cite: 8]
+            success = db.delete_memory_by_id(conversation_key, int(target))
             return {"reply": f"기억삭제완료: [{target}]번" if success else f"[{target}]번 기억을 찾을 수 없어"}
         return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /기억삭제 1)"}
 
@@ -159,31 +158,31 @@ def reply_chat(req: ChatRequest):
     if user_input.startswith("/기억 "):
         mem_text = user_input.replace("/기억 ", "").strip()
         if mem_text:
-            db.save_memory(conversation_key, mem_text)[cite: 8]
+            db.save_memory(conversation_key, mem_text)
             return {"reply": f"응기억햇어: {mem_text}"}
 
     # 5. 말투 학습 명령어
     if user_input.startswith("/말투 "):
         style_text = user_input.replace("/말투 ", "").strip()
         if style_text:
-            db.save_style_sample(style_text)[cite: 8]
+            db.save_style_sample(style_text)
             return {"reply": f"응 이것도 배웟어: {style_text}"}
 
     # 자동 말투 학습
     if is_self and is_meaningful_style_sample(user_input):
-        db.save_style_sample(user_input)[cite: 8]
+        db.save_style_sample(user_input)
 
     # 컨텍스트 조립
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
-    recent_history = db.get_recent_messages(conversation_key, limit=10)[cite: 8]
-    user_memories = db.get_memories(conversation_key)[cite: 8]
+    recent_history = db.get_recent_messages(conversation_key, limit=10)
+    user_memories = db.get_memories(conversation_key)
     
     if hasattr(db, "get_relevant_style_samples"):
         style_examples = db.get_relevant_style_samples(user_input, n=12)
     else:
-        style_examples = db.get_random_style_samples(12)[cite: 8]
+        style_examples = db.get_random_style_samples(12)
 
     deep_mode = is_deep_topic(user_input)
 
@@ -222,7 +221,7 @@ def reply_chat(req: ChatRequest):
         print(f"[Gemini 에러 상세] {e}")
         reply = f"에러: {str(e)[:60]}"
 
-    db.save_message(conversation_key, conversation_key, user_input)[cite: 8]
-    db.save_message(conversation_key, "이태양", reply)[cite: 8]
+    db.save_message(conversation_key, conversation_key, user_input)
+    db.save_message(conversation_key, "이태양", reply)
 
     return {"reply": reply}
