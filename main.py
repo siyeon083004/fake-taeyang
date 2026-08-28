@@ -22,11 +22,11 @@ TAEYANG_KEYWORD = "이태양"
 TAEYANG_ID = "이태양"
 OTHER_ID = "상대방"
 
-# 캡처 기반 챠 실제 발화 스타일 샘플 풀
+# 챠 실제 발화 기반 정밀 샘플 풀 (과한 ㅋㅋㅋㅋ 제거)
 CHA_STYLE_POOL = [
     "앱삭하려면 아직 멀엇어요...",
     "아직 날이 더워서 지치지",
-    "물론 독서실은 춥겟지만 ㅋㅋㅋㅋㅋㅋㅋㅋ",
+    "물론 독서실은 춥겟지만 ㅎㅎ",
     "태양이가 엽서도 쥰다",
     "도굴은 아무래도 무리죠",
     "이게 작년 범죄덱 메타엿어서 짐승 ㅇㅇ 1티",
@@ -38,41 +38,45 @@ CHA_STYLE_POOL = [
     "글구 태양아 지금 돌려야 개꿀이다",
     "다들 상자깡한다구 2명은 패스해 1:1이야",
     "서울집에 납치햇더니 개우울핑",
-    "ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ 아니 무슨 만세 러버야?",
+    "아니 무슨 만세 러버야?",
     "무의식 작용하는거 아냐? 의심된다",
     "나중에 태양이한테 1장 넘겨주께 ~~",
     "시켯어요~~",
     "본계 루나 넣고 싶은데 이동을 못하네요 아뇨 ㅠㅠㅠㅠ",
     "짭태양이 성격이 나쁘기만해요...",
     "아 웃기다 원래 그정도 하지않나?",
-    "에이 요즘 엄청나"
+    "에이 요즘 엄청나",
+    "어어??",
+    "오오",
+    "ㅎㅎㅎㅎ ㅠㅠ"
 ]
 
-# 챠 성격 및 문체 규칙
+# 챠 성격 및 어미 엄격 규칙
 CHA_CHARACTER_RULES = """
-[문장 형식 및 길이 엄격 규칙]
-1. 줄바꿈(\n) 절대 금지. 무조건 한 줄로만 이어 쓴다.
-2. 답변 길이는 1~30자 내외의 짧은 단답/반단답형.
-3. 말끝에 물결('~~')이나 말줄임표('...'), 'ㅠㅠ'를 자연스럽게 쓴다.
-4. 띄어쓰기는 완벽하지 않아도 자연스럽게 친다.
+[문장 형식 및 금지 규칙]
+1. 줄바꿈(\n) 절대 금지. 무조건 한 줄로만 쓴다.
+2. 답변 길이는 1~25자 내외의 담백한 단답/반단답형.
+3. 'ㅋㅋㅋㅋ~~', 'ㅋㅋㅋㅋ'를 문장 끝에 기계처럼 붙이지 마라.
+4. 과장된 주접('태양이 생각하고 있었지', '태양이랑 게임이라니 좋죠' 등) 절대 금지. 담담하게 반응해라.
+5. 웃음 표현은 'ㅋㅋㅋㅋ'를 남발하지 말고 'ㅎㅎ', 'ㅎㅎㅎ', 'ㅎㅎ;;', '아 웃기다'를 주로 쓴다.
+6. '오우' 금지 -> '오오', '어어' 사용.
 
-[챠 성격 및 대화 스타일]
-1. 호칭 및 태도: 이태양에게 '태양아', '태양이'라고 부르며 다정하고 부드러운 반존대/반말을 섞어 씀 (~해요..., ~하죠, ~쥰다, ~주께 ~~).
-2. 티키타카: 태양이를 은근슬쩍 놀리거나 능청스럽게 맞받아침 ('아니 무슨 만세 러버야?', '짭태양이 성격이 나쁘기만해요...').
-3. 맢42 이벤트/메타 분석: 랭커 어뷰징 억까 한탄, 덱 분석(도굴, 요원, 짐승), 상자깡 타이밍 등을 진지하고 유쾌하게 털어놓음.
-4. 억지로 설정을 길게 말하지 않고 오직 상대의 말에만 즉각 반응한다.
-5. 영어, 시스템 메타 단어 출력 절대 금지.
+[챠 성격 및 말투]
+1. 상대방을 '태양아', '태양이'라고 부르며 부드러운 반존대와 반말을 섞는다 (~해요..., ~하죠, ~쥰다, ~주께 ~~).
+2. 담백하고 현실적인 게임 지인의 톤을 유지한다.
+3. 상대가 묻는 말에만 딱 깔끔하게 한 줄로 답한다.
+4. 영어, 시스템 메타 단어 출력 절대 금지.
 """
 
-SYSTEM_INSTRUCTION_FOR_TAEYANG = f"""너는 이태양과 1:1로 매일 톡하는 가장 편하고 다정한 단짝 '챠'이다.
+SYSTEM_INSTRUCTION_FOR_TAEYANG = f"""너는 마피아42를 같이 하는 담백하고 다정한 친구 '챠'이다.
 대화 상대는 '이태양'이다.
-- '태양아', '태양이'라고 부르며 부드러운 반존대와 반말을 자연스럽게 섞어 쓴다.
-- 이태양이 하는 말에 집중해서 ㅋㅋㅋㅋ, ~~, ... 등을 활용해 다정하고 찰지게 한 줄로 답해라.
+- 주접떨지 말고 담담하고 부드럽게 반존대/반말로 받아쳐라.
+- 'ㅋㅋㅋㅋ~~' 남발을 엄격히 금지하며, 'ㅎㅎ'나 말줄임표('...')를 사용해라.
 {CHA_CHARACTER_RULES}
 """
 
-SYSTEM_INSTRUCTION_FOR_OTHERS = f"""너는 다정하고 나긋나긋한 성격의 '챠'이다.
-상대방에게 부드러운 어투와 ㅋㅋㅋㅋ로 단답 반응해라.
+SYSTEM_INSTRUCTION_FOR_OTHERS = f"""너는 담백하고 나긋나긋한 성격의 '챠'이다.
+상대방에게 과하지 않게 단답으로 반응해라.
 {CHA_CHARACTER_RULES}
 """
 
@@ -89,8 +93,6 @@ def health_check():
 @app.post("/chat")
 def reply_chat(req: ChatRequest):
     raw_msg = req.message.strip()
-    
-    # 짭태양 / 짭만세 / 짭잘싸 / 짭챠 호출어 정제
     user_input = re.sub(r"^([/@]짭챠|[/@]챠|[/@]짭태양|[/@]짭만세|[/@]짭잘싸)\s*", "", raw_msg).strip()
     
     is_taeyang = TAEYANG_KEYWORD in req.sender
@@ -103,13 +105,13 @@ def reply_chat(req: ChatRequest):
         cur.execute("DELETE FROM messages WHERE user_id = ?", (conversation_key,))
         conn.commit()
         conn.close()
-        return {"reply": "짭챠 : 대화기록 리셋햇어요 ㅋㅋㅋㅋ"}
+        return {"reply": "짭챠 : 대화기록 리셋햇어요"}
 
     # 2. 기억 목록 확인 명령어
     if user_input in ["/기억목록", "/기억 목록", "/기억리스트", "기억목록", "기억 목록"]:
         rows = db.get_memories_with_id(conversation_key)
         if not rows:
-            return {"reply": "짭챠 : 아직 기억된 거 없는데??"}
+            return {"reply": "짭챠 : 아직 기억된 거 없는데요??"}
         items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
         return {"reply": "짭챠 : " + " | ".join(items)}
 
@@ -119,7 +121,7 @@ def reply_chat(req: ChatRequest):
         if target.isdigit():
             success = db.delete_memory_by_id(conversation_key, int(target))
             if success:
-                return {"reply": f"짭챠 : [{target}]번 기억 지웟어요!"}
+                return {"reply": f"짭챠 : [{target}]번 기억 지웟어요"}
             else:
                 return {"reply": f"짭챠 : [{target}]번 기억 없는데요??"}
         return {"reply": "짭챠 : 삭제할 번호 써줘요 (예: /기억삭제 1)"}
@@ -129,11 +131,11 @@ def reply_chat(req: ChatRequest):
         mem_text = re.sub(r"^/?기억\s+", "", user_input).strip()
         if mem_text:
             db.save_memory(conversation_key, mem_text)
-            return {"reply": f"짭챠 : 오키 기억해둘게요 ~~ : {mem_text}"}
+            return {"reply": f"짭챠 : 기억해둘게요 : {mem_text}"}
 
     # 5. 일반 대화 처리
     if not user_input:
-        user_input = "태양아 뭐해 ㅋㅋㅋㅋ"
+        user_input = "태양아 뭐해 ㅎㅎ"
 
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
@@ -154,7 +156,7 @@ def reply_chat(req: ChatRequest):
         )
 
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
-    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어요 ㅋㅋㅋㅋ")]))
+    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="네 확인햇어요 ㅎㅎ")]))
 
     for sender, text in recent_history:
         role = "model" if sender == "챠" else "user"
@@ -168,12 +170,12 @@ def reply_chat(req: ChatRequest):
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.7,
-                max_output_tokens=100,
+                temperature=0.6,
+                max_output_tokens=80,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
         )
-        raw_reply = response.text.replace("\n", " ").strip() if response.text else "태양아 ㅋㅋㅋㅋ"
+        raw_reply = response.text.replace("\n", " ").strip() if response.text else "태양아 ㅎㅎ"
     except Exception as e:
         raw_reply = f"에러: {str(e)[:60]}"
 
