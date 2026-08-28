@@ -24,7 +24,7 @@ from google.genai import types
 
 import legacy_store as legacy
 from database import SessionLocal, init_db
-from models import Conversation, Identity
+from models import Conversation, Identity, PersonaRelationship
 import seed_and_migrate
 
 # --- 신규 스키마 초기화 + 시딩 (idempotent, 여러 번 실행해도 안전) ---
@@ -41,7 +41,6 @@ if not GEMINI_API_KEY:
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 KST = timezone(timedelta(hours=9))
-SELF_NAME_KEYWORD = "이태양"
 CHA_ID = "챠"
 SELF_ID = "본인"
 
@@ -62,16 +61,57 @@ def get_persona_id():
 
 
 def resolve_target_key(db, display_name: str) -> str:
-    """관측된 표시 이름을 canonical target_key로 해석. 못 찾으면 표시 이름 그대로 사용."""
+    """관측된 표시 이름을 canonical target_key로 해석. 못 찾으면 None (아직 모르는 사람)."""
     row = db.query(Identity).filter_by(display_name=display_name).first()
-    return row.target_key if row else display_name
+    return row.target_key if row else None
 
 
-def log_conversation(speaker_name: str, message: str, room_id: str = "dm"):
+def resolve_or_register(db, display_name: str):
+    """
+    발신자를 canonical target_key로 해석한다.
+    identities에 없는 새 이름이면 즉시 새 사람으로 등록한다 (문서 17장: 사람마다 독립 슬롯).
+    절대로 모르는 사람을 "챠"로 뭉뚱그리지 않는다.
+
+    반환: (target_key, is_new_person)
+    """
+    existing = resolve_target_key(db, display_name)
+    if existing:
+        return existing, False
+
+    # 새 사람: target_key는 우선 표시 이름 그대로 사용 (나중에 별칭이 늘면 identities에 추가 매핑)
+    new_key = display_name
+    db.add(Identity(target_key=new_key, platform="kakaotalk", display_name=display_name, is_primary=1))
+    # 관계 정보도 같이 생성: 아직 미확인 상태로 시작 (문서 35장: 새 정보는 바로 확정하지 않음)
+    db.add(PersonaRelationship(
+        persona_id=get_persona_id(),
+        target_key=new_key,
+        relation_type="미확인",
+        intimacy="LOW",
+        trust="LOW",
+        interaction_style="아직 파악 안 됨 - 기본 예의 있는 톤 유지",
+    ))
+    db.commit()
+    print(f"[identity] 새로운 사람 등록됨: {display_name} (target_key={new_key})")
+    return new_key, True
+
+
+def is_self_sender(sender: str) -> bool:
+    """
+    본인 여부 판별. 예전에는 "이태양" 문자열 포함 여부로 판별했는데,
+    실제 카톡 표시 이름이 "태양"처럼 성 없이 뜨는 방에서는 매칭에 실패해
+    본인을 챠로 오인하는 버그가 있었다. identities 테이블로 판별하도록 교체.
+    """
+    db = SessionLocal()
+    try:
+        return resolve_target_key(db, sender) == "self"
+    finally:
+        db.close()
+
+
+def log_conversation(speaker_name: str, target_key: str, message: str, room_id: str = "dm"):
     """신규 스키마에 원본 대화를 기록한다 (실패해도 챗봇 응답 자체는 막지 않음)."""
     db = SessionLocal()
     try:
-        target_key = resolve_target_key(db, speaker_name)
         db.add(Conversation(
             persona_id=get_persona_id(),
             session_id=None,
@@ -118,6 +158,12 @@ SYSTEM_INSTRUCTION_FOR_SELF = f"""너는 21세 대학생 '이태양'의 AI 클�
 {STYLE_RULES}
 """
 
+SYSTEM_INSTRUCTION_FOR_UNKNOWN = f"""너는 21세 대학생 '이태양'이다.
+지금 대화 상대는 아직 누군지 잘 모르는 사람이다. '챠'라고 부르지 말고, 상대를 챠 대하듯 편하게 굴지도 마라.
+아직 안 친한 사람 대하듯 무뚝뚝하되 예의는 지키는 톤으로 반응해라. 상대에 대해 아는 게 없으면 아는 척하지 말고 자연스럽게 되물어라.
+{STYLE_RULES}
+"""
+
 app = FastAPI()
 
 
@@ -134,11 +180,23 @@ def health_check():
 @app.post("/chat")
 def reply_chat(req: ChatRequest):
     user_input = req.message.replace("@짭태양", "").replace("/짭태양", "").strip()
-    is_self = SELF_NAME_KEYWORD in req.sender
-    conversation_key = SELF_ID if is_self else CHA_ID
+
+    db = SessionLocal()
+    try:
+        target_key, is_new_person = resolve_or_register(db, req.sender)
+    finally:
+        db.close()
+
+    is_self = (target_key == "self")
+    is_cha = (target_key == "cha")
+
+    # 신규/기존 사람 구분 없이 conversation_key는 실제 target_key를 그대로 쓴다.
+    # (예전엔 본인이 아니면 무조건 "챠" 버킷에 몰아넣었는데, 그러면 다른 사람이랑
+    #  대화할 때 기억이 챠 것과 섞이고 챠 취급하는 말투로 답해버리는 버그가 있었음)
+    conversation_key = SELF_ID if is_self else (CHA_ID if is_cha else target_key)
 
     # 신규 스키마에 원본 그대로 기록 (기존 로직 시작 전에 먼저 남긴다)
-    log_conversation(speaker_name=req.sender, message=req.message)
+    log_conversation(speaker_name=req.sender, target_key=target_key, message=req.message)
 
     # 1. 리셋 명령어
     if user_input in ["/리셋", "/초기화"]:
@@ -193,7 +251,11 @@ def reply_chat(req: ChatRequest):
     recent_history = legacy.get_recent_messages(conversation_key, limit=4)
     user_memories = legacy.get_memories(conversation_key)
     style_examples = legacy.get_random_style_samples(12)
-    system_instruction = SYSTEM_INSTRUCTION_FOR_SELF if is_self else SYSTEM_INSTRUCTION_FOR_CHA
+    system_instruction = (
+        SYSTEM_INSTRUCTION_FOR_SELF if is_self
+        else SYSTEM_INSTRUCTION_FOR_CHA if is_cha
+        else SYSTEM_INSTRUCTION_FOR_UNKNOWN
+    )
 
     contents = []
     context_parts = [f"[현재 한국 시각]: {current_time_str}"]
@@ -215,7 +277,7 @@ def reply_chat(req: ChatRequest):
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
+            model="gemini-3.1-pro",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -232,6 +294,6 @@ def reply_chat(req: ChatRequest):
     legacy.save_message(conversation_key, "이태양", reply)
 
     # 신규 스키마에도 봇 응답을 기록 (target_key="self"로 고정: 페르소나 본인 발화)
-    log_conversation(speaker_name="이태양", message=reply)
+    log_conversation(speaker_name="이태양", target_key="self", message=reply)
 
     return {"reply": reply}
