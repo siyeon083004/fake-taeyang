@@ -239,6 +239,7 @@ def reply_chat(req: ChatRequest):
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜그래ㅋ"
         reply = sanitize_reply(reply)
     except Exception as e:
+        print(f"[Gemini 에러 상세] {e}")  # Render Logs에서 전체 에러 내용을 확인할 수 있도록 출력
         reply = f"에러: {str(e)[:60]}"
 
     db.save_message(conversation_key, conversation_key, user_input)
