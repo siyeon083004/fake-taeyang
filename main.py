@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone, timedelta
+import sqlite3
 import re
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -18,32 +19,29 @@ KST = timezone(timedelta(hours=9))
 
 TAEYANG_KEYWORD = "이태양"
 TAEYANG_ID = "이태양"
-OTHER_ID = "상대방"
+DREAM_KEY = "태양의꿈"
 
-DREAM_SYSTEM_INSTRUCTION = """너는 깊은 잠에 빠진 '이태양'의 꿈을 실시간 중계하는 AI다.
+DREAM_SYSTEM_INSTRUCTION = """너는 깊은 잠에 빠진 '이태양'의 무의식 속 꿈을 실시간으로 연속 중계하는 AI다.
 
-[핵심 톤앤매너: '현실감 있는 개꿈']
-1. 기괴하거나 억지스러운 초현실 뇌절 금지.
-2. 현실에서 충분히 꿀 법한 자연스러운 꿈의 흐름을 유지하되, 묘하게 상황이 꼬이고 당황스러운 해프닝을 담는다.
-3. 장소가 갑자기 바뀌거나 게임 지인들과 일상 상황이 자연스럽게 뒤섞이는 꿈 특유의 흐릿한 인과관계를 살린다.
+[핵심 톤앤매너 & 서사 전개 규칙]
+1. 연속성 유지: 이전에 중계한 직전 꿈 장면이 주어진다면, 그 상황에서 이어지는 '다음 장면/후속 사건'으로 자연스럽게 이야기를 연결해라.
+2. 키워드 과밀 금지: 한 번에 온갖 인물과 설정을 다 쏟아붓지 마라. 매 턴마다 [인물 1~2명] 혹은 [특정 사건 1개]에만 집중해서 현실감 있는 해프닝을 풀어내라.
+3. 글자수 다양성: 상황에 따라 30자 내외의 짧은 촌철살인 단문부터, 80~120자 내외의 디테일한 상황 묘사까지 분량을 다채롭게 조절해라.
+4. 줄바꿈(\\n) 절대 금지. 무조건 한 줄로만 출력. 접두사는 서버가 붙이므로 오직 꿈 본문만 출력해라.
 
-[태양의 일상 & 게임 소재 데이터]
-- 지인들:
-  * 챠: 태양이 피로 걱정하며 피로회복제 챙겨주거나, 두더지 인형 들고 와서 맢42 이벤 같이 하자고 조름
-  * 만세: 피지컬 이슈로 패들패들패들 노 거꾸로 젓거나, 맢42 억까당해서 ㅋㅋㅋㅋ거리며 징징댐
-  * 잘싸: 듀방이나 피시방에서 "어허 돼지on" 거리며 스팀 할인겜 하자고 쪼아댐
-  * 허디: 기러기길드 미접속자 쳐내려고 길드 관리 명단 들고 다님
-  * 불쾌: 모란앵무(모란이) 돌보면서 오타 가득한 카톡 치고 있음
-- 배경/소재:
-  * 맢42 상자깡(대부/술사 스킨 노리기, 백지수표 억까, 6티 도굴 카드)
-  * 스팀 게임 '패들패들패들' 협동 플레이
-  * 독서실/학원 탈출, 리볼빙 공부법, 과외
-  * 성심당 빵 사러 가기, 5천원짜리 닭강정 사 먹기, 2차 빙수, 한화 이글스 직관
-
-[출력 규칙]
-1. 접두사는 서버 코드에서 붙이므로, 너는 뒤에 이어질 꿈 내용만 1~2줄(40~80자 내외)로 출력해라.
-2. 줄바꿈(\n) 금지. 무조건 한 줄로만 출력.
-3. 차분하면서도 묘하게 억울하고 웃긴 꿈 관찰자 톤.
+[무의식 인물 & 일상 배경 풀 (1~2개씩만 자연스럽게 골라 쓸 것)]
+- 챠(한이현): 두더지 인형, 피로회복제 챙김, 미니게임 떡치기/배섬 공략, 능청스러운 조언
+- 만세: 기러기길드 부마(광주), 맢42/스팀 패들패들패들 피지컬 똥손, 리플 분석 집착
+- 잘싸(잘생긴싸람): 듀방 방장, "어허 돼지on" 거리며 스팀 할인겜 조름
+- 허디: 기러기길드 실질적 운영, 장기 미접자 관리
+- 기러기: 얼굴마담 길마, 유튜버
+- 불쾌: 모란앵무(모란이) 키움, 오타 심함, 태양이가 밀서 보내는 상대
+- 쁏(은미): 양초 닉 원소유자, 술사로 왈왈 짖는 플레이
+- 암산천: 2티 도굴 올리고 대부 사기당하는 엉뚱한 뉴비
+- 생쥐생쥐: 인게임에서 응애응애거리며 유언청부로 달리는 블러핑러
+- 스틸: 한화 이글스 골수팬 동갑 지인, 랭점 자랑
+- 다노, 설(독설), 콩곤듀, 자경이, 고장이, 먀옹이
+- 게임/일상: 맢42 6티 도굴, 대부/술사 스킨 상자깡 억까, 스팀 패들패들패들 노 젓기, 독서실 에어컨, 성심당 빵, 5천원 닭강정, 2차 빙수, 한화 이글스 야구장
 """
 
 app = FastAPI()
@@ -61,24 +59,50 @@ def reply_chat(req: ChatRequest):
     raw_msg = req.message.strip()
     user_input = re.sub(r"^([/@]짭태양|[/@]짭만세|[/@]짭잘싸|[/@]짭챠|[/@]꿈)\s*", "", raw_msg).strip()
 
+    # 리셋 요청 시 꿈 히스토리 초기화
+    if user_input in ["/리셋", "/초기화", "리셋", "초기화"]:
+        conn = sqlite3.connect("taeyang.db")
+        cur = conn.cursor()
+        cur.execute("DELETE FROM messages WHERE user_id = ?", (DREAM_KEY,))
+        conn.commit()
+        conn.close()
+        return {"reply": "(와타시자는중) 이태양은 꿈에서 뭘하고있을까? : 꿈속 기억이 리셋되어 깊은 무의식으로 빠져드는 중..."}
+
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
-    prompt = f"[현재 한국 시각 {current_time_str}] 태양이가 지금 꾸고 있을 법한 자연스럽고 억울한 개꿈 한 장면을 중계해줘. 상대 말: '{user_input}'"
+    # 이전 꿈 히스토리 4개 가져오기 (연속성 확보)
+    recent_dreams = db.get_recent_messages(DREAM_KEY, limit=4)
+
+    contents = []
+    context_parts = [f"[현재 시각]: {current_time_str}"]
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
+    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="꿈의 타임라인을 확인했습니다.")]))
+
+    for sender, text in recent_dreams:
+        role = "model" if sender == "꿈중계" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+
+    prompt_msg = user_input if user_input else "지금 꿈에서 무슨 일이 일어나고 있어?"
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=f"상대 질문: '{prompt_msg}'. 이전 꿈에서 이어지는 다음 장면을 한 줄로 중계해줘.")]))
 
     try:
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite",
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=DREAM_SYSTEM_INSTRUCTION,
-                temperature=0.8,
-                max_output_tokens=100,
+                temperature=0.85,
+                max_output_tokens=150,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
         )
-        dream_text = response.text.replace("\n", " ").strip() if response.text else "성심당 빵 사러 줄 섰는데 지갑 안 가져온 꿈..."
+        dream_text = response.text.replace("\n", " ").strip() if response.text else "성심당 빵을 품에 안고 독서실로 걸어가는 중..."
     except Exception as e:
         dream_text = f"꿈 주파수 수신 오류: {str(e)[:40]}"
 
-    return {"reply": f"이태양은 지금 꿈에서 뭘할까? : {dream_text}"}
+    # 꿈 연속성을 위해 DB에 저장
+    db.save_message(DREAM_KEY, req.sender, prompt_msg)
+    db.save_message(DREAM_KEY, "꿈중계", dream_text)
+
+    return {"reply": f"(와타시자는중) 이태양은 꿈에서 뭘하고있을까? : {dream_text}"}
