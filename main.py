@@ -1,7 +1,7 @@
 import os
 import re
-from datetime import datetime, timezone, timedelta
 import sqlite3
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI
 from pydantic import BaseModel
 from google import genai
@@ -10,110 +10,29 @@ import database as db
 
 db.init_db()
 
-# 실제 카톡 대화에서 추출한 이태양 말투 원본 로드
-imported_count = db.import_style_samples("style_samples.txt")
-if imported_count:
-    print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
-
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
-
+# Render 환경변수에서 안전하게 키 로드
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6Ix1VS_FMCpl36upR9vy-cnFU01KbW_MfuZ_vhud5hePw")
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+USER_ID = "챠"
 KST = timezone(timedelta(hours=9))
 
-MODEL_NAME = "gemini-3.6-flash"
+SYSTEM_INSTRUCTION = """너는 21세 여성 '이태양'이다. (절대 남자 아님! 21세 여자!)
+상대방은 30세 '챠'(한이현)(여자임)이며, 매일 갠톡을 주고받는 매우 편하고 장난스러운 사이다.
 
-SELF_NAME_KEYWORD = "이태양"
-SELF_ID = "본인"
+[대화 원칙 및 성격]
+1. 인위적인 신조어나 과장된 밈을 어색하게 욱여넣지 마라.
+2. 예전문장을 그대로 앵무새처럼 돌려막지 말고, 상대방 말의 내용과 뉘앙스에 맞춰 자연스럽게 실시간 반응해라.
+3. 챠가 치대거나 장난치면 적당히 틱틱대며 받아주고, 능청스럽게 넘기거나 딴청을 피우기도 한다.
 
-# 팩트 기반 기본 상식
-BACKGROUND_KNOWLEDGE = """
-[이태양 기본 상식 & 관계]
-- 21세 여자 대학생(공대생), 대전 거주, 한화 이글스 팬.
-- 주로 하는 게임: 마피아42(맢42, 맢), 테일즈런너(테런).
-- 나성수(성수): 마피아42 대표/개발자. 서버 터지거나 패치 망칠 때마다 욕함.
-- 챠(한이현, 닉네임 만사랑 등): 마피아42에서 만난 30세 찐친. 갠톡 매일 함. 챠는 현질을 잘하고 이벤트를 잘함.
-- 만세, 잘싸, 허디, 난힐, 불쾌, 심저: 맢42/테런 같이 하는 지인들.
+[말투 및 텍스트 습관]
+1. 1줄 단답형 카톡 (1~25자 내외). 한두 글자 단답도 자주 씀. 줄바꿈 금지.
+2. 마침표(.)나 느낌표(!) 절대 금지. 물음표(?)는 사용.
+3. 띄어쓰기는 완벽하게 맞추지 않고 자연스럽게 뭉개며 친다.
+4. 'ㅅ' 받침을 편하게 쓴다 (됏어, 햇음, 갓다옴, 잇어 등).
+5. 종결어미는 '~어?', '~지', '~음', '~함', '~네', '~아님?', '~삼', '~한감?' 위주로 쓰며, '~냐'는 쓰지 않는다.
+6. 웃음 패턴: ㅋㅋㅋㅋㅋㅋㅋㅋ 길게, ㅋㅎㅋㅎㅋㅎㅋㅎ 연타, ㅋ, ㅎ;;, 엌ㅋㅋㅋㅋ 등을 상황에 맞게 쓴다.
 """
-
-STYLE_RULES = f"""
-{BACKGROUND_KNOWLEDGE}
-
-[말투 규칙]
-1. 인위적이거나 과장된 억지 말투(알앗겟음, 잇음?? 등) 절대 금지.
-2. 아래 [이태양이 실제로 쓴 말투 예시]에 나오는 표현과 톤을 그대로 따라서 자연스럽게 대답해라.
-3. 줄바꿈(\\n) 금지, 카톡 단답형(1~30자 내외)으로 툭툭 던진다.
-4. 문장부호(. !)는 쓰지 않고 물음표(?)는 쓴다.
-5. 마피아42 관련 질문이나 계산은 상황에 맞게 팩트로만 대답한다.
-"""
-
-SYSTEM_INSTRUCTION_FOR_CHA = f"""너는 21세 대학생 '이태양'이다.
-대화 상대는 마피아42로 알게 된 오랜 지인 '챠'(만사랑, 한이현)이다.
-서로 모든 걸 다 아는 찐친 사이니까 쿨하고 털털하게 반말로 대화해라.
-{STYLE_RULES}
-"""
-
-SYSTEM_INSTRUCTION_FOR_SELF = f"""너는 21세 대학생 '이태양'의 AI 클론 '짭태양'이다.
-지금 대화 상대는 진짜 이태양 본인이다. 혼잣말하듯 털털하게 받아쳐라. 상대를 '챠'라고 부르지 마라.
-{STYLE_RULES}
-"""
-
-DEFAULT_FRIEND_SYSTEM_INSTRUCTION = f"""너는 21세 대학생 '이태양'이다.
-대화 상대는 친한 게임 친구이다. 편하게 반말로 툭툭 던지듯이 대화해라.
-{STYLE_RULES}
-"""
-
-FRIEND_PERSONAS = {
-    "챠": {
-        "keyword": "한이현",
-        "system_instruction": SYSTEM_INSTRUCTION_FOR_CHA,
-    },
-    "만사랑": {
-        "keyword": "만사랑",
-        "system_instruction": SYSTEM_INSTRUCTION_FOR_CHA,
-    },
-    "바보만세": {
-        "keyword": "만세",
-        "system_instruction": DEFAULT_FRIEND_SYSTEM_INSTRUCTION,
-    }
-}
-
-DEEP_TOPIC_KEYWORDS = [
-    "고민", "힘들", "진지하게", "진지한", "걱정", "우울", "속상", "스트레스",
-    "어떡하지", "어떻게 해야", "조언", "괜찮을까", "무섭", "불안", "헤어져",
-    "그만두", "포기", "죽고싶", "죽고 싶"
-]
-
-HANGUL_SYLLABLE = re.compile(r"[가-힣]")
-
-def is_deep_topic(text: str) -> bool:
-    if len(text) >= 35:
-        return True
-    return any(keyword in text for keyword in DEEP_TOPIC_KEYWORDS)
-
-def is_meaningful_style_sample(text: str) -> bool:
-    return len(text) >= 2 and bool(HANGUL_SYLLABLE.search(text))
-
-LEAK_PATTERNS = ["constraints check", "system prompt", "policy", "disallowed", "as an ai", "i cannot", "i can't"]
-
-def sanitize_reply(text: str) -> str:
-    lowered = text.lower()
-    if any(p in lowered for p in LEAK_PATTERNS):
-        return "어왜ㅋ"
-
-    hangul_count = len(HANGUL_SYLLABLE.findall(text))
-    alpha_count = len(re.findall(r"[a-zA-Z]", text))
-    if alpha_count >= 8 and hangul_count == 0:
-        return "어왜ㅋ"
-
-    return text
-
-def resolve_friend(sender: str):
-    for friend_id, info in FRIEND_PERSONAS.items():
-        if info["keyword"] in sender:
-            return friend_id, info["system_instruction"]
-    return sender, DEFAULT_FRIEND_SYSTEM_INSTRUCTION
 
 app = FastAPI()
 
@@ -127,111 +46,98 @@ def health_check():
 
 @app.post("/chat")
 def reply_chat(req: ChatRequest):
-    user_input = req.message.replace("@짭태양", "").replace("/짭태양", "").strip()
-    is_self = SELF_NAME_KEYWORD in req.sender
+    raw_msg = req.message.strip()
 
-    if is_self:
-        conversation_key = SELF_ID
-        system_instruction = SYSTEM_INSTRUCTION_FOR_SELF
-    else:
-        conversation_key, system_instruction = resolve_friend(req.sender)
+    # 1. 슬래시 명령어 전용 처리 (/짭태양)
+    if raw_msg.startswith("/짭태양"):
+        cmd_body = raw_msg.replace("/짭태양", "", 1).strip()
 
-    # 1. 리셋 명령어
-    if user_input in ["/리셋", "/초기화"]:
-        conn = sqlite3.connect("taeyang.db")
-        cur = conn.cursor()
-        cur.execute("DELETE FROM messages WHERE user_id = ?", (conversation_key,))
-        conn.commit()
-        conn.close()
-        return {"reply": "대화기록초기화완료"}
+        # /짭태양 리셋 / /짭태양 초기화
+        if cmd_body in ["리셋", "초기화"]:
+            try:
+                conn = sqlite3.connect("taeyang.db")
+                cur = conn.cursor()
+                cur.execute("DELETE FROM messages")
+                conn.commit()
+                conn.close()
+                return {"reply": "대화기록초기화완료"}
+            except Exception as e:
+                return {"reply": f"에러: {str(e)[:30]}"}
 
-    # 2. 기억 목록 확인
-    if user_input in ["/기억목록", "/기억 목록"]:
-        rows = db.get_memories_with_id(conversation_key)
-        if not rows:
-            return {"reply": "기억된 정보가 없어"}
-        items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
-        return {"reply": " | ".join(items)}
+        # /짭태양 기억목록
+        if cmd_body in ["기억목록", "기억 목록", "기억리스트"]:
+            try:
+                rows = db.get_memories_with_id(USER_ID)
+                if not rows:
+                    return {"reply": "기억된 정보가 없어"}
+                items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
+                list_str = " | ".join(items)
+                return {"reply": list_str}
+            except Exception as e:
+                return {"reply": f"목록조회에러: {str(e)[:30]}"}
 
-    # 3. 기억 삭제
-    if user_input.startswith("/기억삭제"):
-        target = user_input.replace("/기억삭제", "").strip()
-        if target.isdigit():
-            success = db.delete_memory_by_id(conversation_key, int(target))
-            return {"reply": f"기억삭제완료: [{target}]번" if success else f"[{target}]번 기억을 찾을 수 없어"}
-        return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /기억삭제 1)"}
+        # /짭태양 기억삭제 [번호]
+        if cmd_body.startswith("기억삭제") or cmd_body.startswith("기억 삭제"):
+            target = cmd_body.replace("기억삭제", "").replace("기억 삭제", "").strip()
+            if target.isdigit():
+                try:
+                    success = db.delete_memory_by_id(USER_ID, int(target))
+                    if success:
+                        return {"reply": f"기억삭제완료: [{target}]번"}
+                    else:
+                        return {"reply": f"[{target}]번 기억을 찾을 수 없어"}
+                except Exception as e:
+                    return {"reply": f"삭제에러: {str(e)[:30]}"}
+            return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /짭태양 기억삭제 1)"}
 
-    # 4. 기억 저장
-    if user_input.startswith("/기억 "):
-        mem_text = user_input.replace("/기억 ", "", 1).strip()
-        if mem_text:
-            db.save_memory(conversation_key, mem_text)
-            return {"reply": f"응기억햇어: {mem_text}"}
+        # /짭태양 기억 [내용]
+        if cmd_body.startswith("기억"):
+            mem_text = re.sub(r"^기억\s*", "", cmd_body).strip()
+            if mem_text:
+                try:
+                    db.save_memory(USER_ID, mem_text)
+                    return {"reply": f"응기억햇어: {mem_text}"}
+                except Exception as e:
+                    return {"reply": f"저장에러: {str(e)[:30]}"}
 
-    # 5. 말투 학습 명령어
-    if user_input.startswith("/말투 "):
-        style_text = user_input.replace("/말투 ", "", 1).strip()
-        if style_text:
-            db.save_style_sample(style_text)
-            return {"reply": f"응 이것도 배웟어: {style_text}"}
+    # 2. 일반 대화 처리 (@짭태양 호출어 제거)
+    user_input = raw_msg.replace("@짭태양", "").strip()
+    if not user_input:
+        user_input = "어왜"
 
-    # 자동 말투 학습
-    if is_self and is_meaningful_style_sample(user_input):
-        db.save_style_sample(user_input)
-
-    # 컨텍스트 조립
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
-    recent_history = db.get_recent_messages(conversation_key, limit=10)
-    user_memories = db.get_memories(conversation_key)
-    
-    style_examples = db.get_relevant_style_samples(user_input, n=12)
-    knowledge_records = db.search_knowledge(user_input, limit=6)
+    recent_history = db.get_recent_messages(USER_ID, limit=4)
+    user_memories = db.get_memories(USER_ID)
 
-    deep_mode = is_deep_topic(user_input)
-
-    contents = []
+    history_contents = []
     context_parts = [f"[현재 한국 시각]: {current_time_str}"]
-    context_parts.append(f"[답변 모드]: {'진지 모드' if deep_mode else '평소 모드'}")
-    
     if user_memories:
         context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
-        
-    if knowledge_records:
-        context_parts.append("[참고할 과거 실제 카톡 내용]: " + " / ".join(knowledge_records))
-        
-    if style_examples:
-        context_parts.append(
-            "[이태양이 실제로 쓴 말투 예시, 이 느낌과 표현으로 대답해]: " + " / ".join(style_examples)
-        )
 
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
-    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 확인햇어")]))
+    history_contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
+    history_contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어")]))
 
     for sender, text in recent_history:
         role = "model" if sender == "이태양" else "user"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
-
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_input)]))
+        history_contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
 
     try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=contents,
+        chat = client.chats.create(
+            model="gemini-3.6-flash",
+            history=history_contents,
             config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
-                max_output_tokens=1500,
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.75,
             )
         )
+        response = chat.send_message(user_input)
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜ㅋ"
-        reply = sanitize_reply(reply)
     except Exception as e:
-        print(f"[Gemini 에러 상세] {e}")
-        reply = f"에러: {str(e)[:60]}"
+        reply = f"에러: {str(e)[:40]}"
 
-    db.save_message(conversation_key, conversation_key, user_input)
-    db.save_message(conversation_key, "이태양", reply)
+    db.save_message(USER_ID, USER_ID, user_input)
+    db.save_message(USER_ID, "이태양", reply)
 
     return {"reply": reply}
