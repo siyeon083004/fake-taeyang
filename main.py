@@ -234,7 +234,6 @@ def reply_chat(req: ChatRequest):
                 system_instruction=system_instruction,
                 temperature=0.7,
                 max_output_tokens=220 if deep_mode else 120,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),  # 생각 과정 텍스트가 답변에 새어나오는 걸 막기 위해 끔
             )
         )
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜그래ㅋ"
