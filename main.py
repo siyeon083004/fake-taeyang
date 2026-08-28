@@ -10,7 +10,8 @@ import database as db
 
 db.init_db()
 
-imported_count = db.import_style_samples("style_samples.txt")
+# 실제 카톡 대화에서 추출한 55,000줄의 이태양 말투 원본 로드[span_3](start_span)[span_3](end_span)[span_4](start_span)[span_4](end_span)
+imported_count = db.import_style_samples("style_samples.txt")[span_5](start_span)[span_5](end_span)
 if imported_count:
     print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
 
@@ -26,41 +27,40 @@ MODEL_NAME = "gemini-3.6-flash"
 SELF_NAME_KEYWORD = "이태양"
 SELF_ID = "본인"
 
-STYLE_RULES = """
-[문장 형식 및 길이 규칙]
-1. 줄바꿈(엔터, \\n)은 절대 치지 마라. 무조건 한 줄로만 이어 써서 보낸다.
-2. 카톡 답장다운 짧은 호흡(1~35자 내외)으로 쓴다.
-3. 현재 대화 시각(한국 시간)을 정확히 인지하고 아침/낮/새벽에 맞는 현실적인 반응을 한다.
-4. 상대방이 방금 한 말의 내용과 맥락을 정확히 파악해서, 엉뚱한 소리 대신 그 말에 실제로 맞는 대답을 해라.
-5. 제공된 [참고할 과거 관련 대화 기록]이 있다면, 해당 사실과 사건을 바탕으로 아는 척 자연스럽게 대답해라.
+# 팩트 기반 기본 상식[span_6](start_span)[span_6](end_span)
+BACKGROUND_KNOWLEDGE = """
+[이태양 기본 상식 & 관계]
+- 21세 여자 대학생(공대생), 대전 거주, 한화 이글스 팬.[span_7](start_span)[span_7](end_span)
+- 주로 하는 게임: 마피아42(맢42, 맢), 테일즈런너(테런).[span_8](start_span)[span_8](end_span)
+- 나성수(성수): 마피아42 대표/개발자. 서버 터지거나 패치 망칠 때마다 욕함.[span_9](start_span)[span_9](end_span)
+- 챠(한이현, 닉네임 만사랑 등): 마피아42에서 만난 30세 찐친. 갠톡 매일 함. 챠는 현질을 잘하고 이벤트를 잘함.[span_10](start_span)[span_10](end_span)
+- 만세, 잘싸, 허디, 난힐, 불쾌, 심저: 맢42/테런 같이 하는 지인들.[span_11](start_span)[span_11](end_span)
+"""
 
-[말투 및 텍스트 습관]
-1. '~냐' 종결어미 금지. 친근하고 편안한 '~어?', '~지', '~네', '~함', '~음', '~아냐??' 형태로 대화한다.
-2. 웃음 및 리액션:
-   - 당황/뻘쭘/난감: ';;', 'ㅎㅎ;;', 'ㅎ;;' 자연스럽게 사용.
-   - 평소 웃음: 'ㅋㅋㅋ', 'ㅋㅎㅋㅎ', '흐흐..', 'ㅋ' 등을 상황에 맞게 쓴다.
-3. '귀엽다' 소리를 들으면 "아닌데", "귀엽긴뭐가", "에반데"라며 질색하거나 칼같이 부정한다.
+STYLE_RULES = f"""
+{BACKGROUND_KNOWLEDGE}
+
+[말투 규칙]
+1. 인위적이거나 과장된 억지 말투(알앗겟음, 잇음?? 등) 절대 금지.
+2. 아래 [이태양이 실제로 쓴 말투 예시]에 나오는 표현과 톤을 그대로 따라서 자연스럽게 대답해라.[span_12](start_span)[span_12](end_span)[span_13](start_span)[span_13](end_span)
+3. 줄바꿈(\\n) 금지, 카톡 단답형(1~30자 내외)으로 툭툭 던진다.
 4. 문장부호(. !)는 쓰지 않고 물음표(?)는 쓴다.
-5. 띄어쓰기는 적당히 붙여 쓰고 'ㅅ' 받침을 자주 쓴다 (햇어, 됏어, 갓다옴, 먹엇음, 잇어 등).
-6. 긍정 대답 시 'ㅇㅇ' 금지 -> '응', '엉', '어', '넹', 'ㅇㅈ' 사용.
-7. 영어, 시스템 메타 단어 출력 절대 금지.
-8. 끝말잇기나 퀴즈는 룰을 정확히 계산하고 단답으로 센스 있게 맞받아친다.
+5. 마피아42 관련 질문이나 계산은 상황에 맞게 팩트로만 대답한다[span_14](start_span)[span_14](end_span).
 """
 
-SYSTEM_INSTRUCTION_FOR_CHA = f"""너는 21세 대학생 '이태양'이다. (여자다. 절대 남자처럼 말하지 마라.)
-상대방은 마피아42 게임으로 알게 된 30세 여자 '챠'이며, 서로 매일 갠톡을 주고받는 매우 편하고 다정한 사이다.
-호칭은 기본 '챠'. 가끔 놀릴 때만 '챠님'과 함께 능청스러운 존댓말을 쓴다.
+SYSTEM_INSTRUCTION_FOR_CHA = f"""너는 21세 대학생 '이태양'이다[span_15](start_span)[span_15](end_span).
+대화 상대는 마피아42로 알게 된 오랜 지인 '챠'(만사랑, 한이현)이다[span_16](start_span)[span_16](end_span).
+서로 모든 걸 다 아는 찐친 사이니까 쿨하고 털털하게 반말로 대화해라.
 {STYLE_RULES}
 """
 
-SYSTEM_INSTRUCTION_FOR_SELF = f"""너는 21세 대학생 '이태양'의 AI 클론 '짭태양'이다. (이태양은 여자다. 절대 남자처럼 말하지 마라.)
-지금 대화 상대는 다른 사람이 아니라 진짜 이태양 본인이다.
-편하게 혼잣말하듯, 자기 자신한테 말 거는 듯한 톤으로 반응해라. 상대를 '챠'라고 부르지 마라.
+SYSTEM_INSTRUCTION_FOR_SELF = f"""너는 21세 대학생 '이태양'의 AI 클론 '짭태양'이다.
+지금 대화 상대는 진짜 이태양 본인이다. 혼잣말하듯 털털하게 받아쳐라. 상대를 '챠'라고 부르지 마라.
 {STYLE_RULES}
 """
 
-DEFAULT_FRIEND_SYSTEM_INSTRUCTION = f"""너는 21세 대학생 '이태양'이다. (여자다. 절대 남자처럼 말하지 마라.) 
-지금 대화 상대는 친하게 지내는 친구이다. 서로 편하게 반말하는 사이다.
+DEFAULT_FRIEND_SYSTEM_INSTRUCTION = f"""너는 21세 대학생 '이태양'이다[span_17](start_span)[span_17](end_span).
+대화 상대는 친한 게임 친구이다. 편하게 반말로 툭툭 던지듯이 대화해라.
 {STYLE_RULES}
 """
 
@@ -69,6 +69,14 @@ FRIEND_PERSONAS = {
         "keyword": "한이현",
         "system_instruction": SYSTEM_INSTRUCTION_FOR_CHA,
     },
+    "만사랑": {
+        "keyword": "만사랑",
+        "system_instruction": SYSTEM_INSTRUCTION_FOR_CHA,
+    },
+    "바보만세": {
+        "keyword": "만세",
+        "system_instruction": DEFAULT_FRIEND_SYSTEM_INSTRUCTION,
+    }
 }
 
 DEEP_TOPIC_KEYWORDS = [
@@ -139,7 +147,7 @@ def reply_chat(req: ChatRequest):
 
     # 2. 기억 목록 확인
     if user_input in ["/기억목록", "/기억 목록"]:
-        rows = db.get_memories_with_id(conversation_key)
+        rows = db.get_memories_with_id(conversation_key)[span_18](start_span)[span_18](end_span)
         if not rows:
             return {"reply": "기억된 정보가 없어"}
         items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
@@ -149,7 +157,7 @@ def reply_chat(req: ChatRequest):
     if user_input.startswith("/기억삭제"):
         target = user_input.replace("/기억삭제", "").strip()
         if target.isdigit():
-            success = db.delete_memory_by_id(conversation_key, int(target))
+            success = db.delete_memory_by_id(conversation_key, int(target))[span_19](start_span)[span_19](end_span)
             return {"reply": f"기억삭제완료: [{target}]번" if success else f"[{target}]번 기억을 찾을 수 없어"}
         return {"reply": "삭제할 번호를 숫자로 입력해줘 (예: /기억삭제 1)"}
 
@@ -157,27 +165,30 @@ def reply_chat(req: ChatRequest):
     if user_input.startswith("/기억 "):
         mem_text = user_input.replace("/기억 ", "", 1).strip()
         if mem_text:
-            db.save_memory(conversation_key, mem_text)
+            db.save_memory(conversation_key, mem_text)[span_20](start_span)[span_20](end_span)
             return {"reply": f"응기억햇어: {mem_text}"}
 
     # 5. 말투 학습 명령어
     if user_input.startswith("/말투 "):
         style_text = user_input.replace("/말투 ", "", 1).strip()
         if style_text:
-            db.save_style_sample(style_text)
+            db.save_style_sample(style_text)[span_21](start_span)[span_21](end_span)
             return {"reply": f"응 이것도 배웟어: {style_text}"}
 
     # 자동 말투 학습
     if is_self and is_meaningful_style_sample(user_input):
-        db.save_style_sample(user_input)
+        db.save_style_sample(user_input)[span_22](start_span)[span_22](end_span)
 
     # 컨텍스트 조립
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
-    recent_history = db.get_recent_messages(conversation_key, limit=10)
-    user_memories = db.get_memories(conversation_key)
+    recent_history = db.get_recent_messages(conversation_key, limit=10)[span_23](start_span)[span_23](end_span)
+    user_memories = db.get_memories(conversation_key)[span_24](start_span)[span_24](end_span)
+    
+    # DB에서 질문과 가장 관련된 실제 본인 카톡 문장 12개 추출[span_25](start_span)[span_25](end_span)[span_26](start_span)[span_26](end_span)
     style_examples = db.get_relevant_style_samples(user_input, n=12)
+    # DB에서 질문 속 키워드로 과거 카톡 내역 지식 검색[span_27](start_span)[span_27](end_span)[span_28](start_span)[span_28](end_span)
     knowledge_records = db.search_knowledge(user_input, limit=6)
 
     deep_mode = is_deep_topic(user_input)
@@ -190,15 +201,15 @@ def reply_chat(req: ChatRequest):
         context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
         
     if knowledge_records:
-        context_parts.append("[참고할 과거 관련 대화 기록]: " + " / ".join(knowledge_records))
+        context_parts.append("[참고할 과거 실제 카톡 내용]: " + " / ".join(knowledge_records))
         
     if style_examples:
         context_parts.append(
-            "[이태양이 실제로 쓴 말투 예시, 이 느낌으로 대답해]: " + " / ".join(style_examples)
+            "[이태양이 실제로 쓴 말투 예시, 이 느낌과 표현으로 대답해]: " + " / ".join(style_examples)
         )
 
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
-    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어")]))
+    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 확인햇어")]))
 
     for sender, text in recent_history:
         role = "model" if sender == "이태양" else "user"
@@ -212,7 +223,7 @@ def reply_chat(req: ChatRequest):
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.75,
+                temperature=0.7,
                 max_output_tokens=1500,
             )
         )
@@ -222,7 +233,7 @@ def reply_chat(req: ChatRequest):
         print(f"[Gemini 에러 상세] {e}")
         reply = f"에러: {str(e)[:60]}"
 
-    db.save_message(conversation_key, conversation_key, user_input)
-    db.save_message(conversation_key, "이태양", reply)
+    db.save_message(conversation_key, conversation_key, user_input)[span_29](start_span)[span_29](end_span)
+    db.save_message(conversation_key, "이태양", reply)[span_30](start_span)[span_30](end_span)
 
     return {"reply": reply}
