@@ -76,63 +76,59 @@ def reply_chat(req: ChatRequest):
     raw_msg = req.message.strip()
     sender_name = req.sender.strip() if req.sender.strip() else "익명"
 
-    # 1. 짭태양 호출 시 칼같이 사망 단답 처리
-    if "@짭태양" in raw_msg or "/짭태양" in raw_msg or raw_msg == "짭태양":
-        return {"reply": "짭태양 사망"}
-
-    # 2. 짭만세 호출어 정제
-    user_input = raw_msg.replace("@짭만세", "").replace("/짭만세", "").replace("@만세", "").replace("/만세", "").strip()
+    # 모든 접두어(@짭태양, /짭태양, @짭만세 등)를 일괄 제거하여 본문만 추출
+    clean_msg = re.sub(r"^([/@]짭태양|[/@]짭만세|[@/]만세|[@/]태양)\s*", "", raw_msg).strip()
     
     is_taeyang = "이태양" in sender_name
     conversation_key = TAEYANG_ID if is_taeyang else sender_name
 
-    # 3. 슬래시 명령어 처리
-    if user_input in ["/리셋", "/초기화"]:
+    # 1. 슬래시/키워드 명령어 처리
+    if clean_msg in ["리셋", "초기화", "/리셋", "/초기화"]:
         try:
             conn = sqlite3.connect("taeyang.db")
             cur = conn.cursor()
             cur.execute("DELETE FROM messages WHERE user_id = ?", (conversation_key,))
             conn.commit()
             conn.close()
-            return {"reply": "대화기록 리셋햇어 ㅋㅋㅋㅋ"}
+            return {"reply": "짭만세 : 대화기록 리셋햇어 ㅋㅋㅋㅋ"}
         except Exception as e:
-            return {"reply": f"에러: {str(e)[:30]}"}
+            return {"reply": f"짭만세 : 에러: {str(e)[:30]}"}
 
-    if user_input in ["/기억목록", "/기억 목록", "/기억리스트"]:
+    if clean_msg in ["기억목록", "기억 목록", "기억리스트", "/기억목록", "/기억 목록"]:
         try:
             rows = db.get_memories_with_id(conversation_key)
             if not rows:
-                return {"reply": "아직 기억된거 없는디??"}
+                return {"reply": "짭만세 : 아직 기억된거 없는디??"}
             items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
-            return {"reply": " | ".join(items)}
+            return {"reply": "짭만세 : " + " | ".join(items)}
         except Exception as e:
-            return {"reply": f"목록조회에러: {str(e)[:30]}"}
+            return {"reply": f"짭만세 : 목록조회에러: {str(e)[:30]}"}
 
-    if user_input.startswith("/기억삭제") or user_input.startswith("/기억 삭제"):
-        target = user_input.replace("/기억삭제", "").replace("/기억 삭제", "").strip()
+    if clean_msg.startswith("기억삭제") or clean_msg.startswith("기억 삭제") or clean_msg.startswith("/기억삭제"):
+        target = re.sub(r"^/?기억\s*삭제\s*", "", clean_msg).strip()
         if target.isdigit():
             try:
                 success = db.delete_memory_by_id(conversation_key, int(target))
                 if success:
-                    return {"reply": f"[{target}]번 기억 지웟음!"}
+                    return {"reply": f"짭만세 : [{target}]번 기억 지웟음!"}
                 else:
-                    return {"reply": f"[{target}]번 기억 없는데??"}
+                    return {"reply": f"짭만세 : [{target}]번 기억 없는데??"}
             except Exception as e:
-                return {"reply": f"삭제에러: {str(e)[:30]}"}
-        return {"reply": "삭제할 번호 숫자로 써줘 (예: /기억삭제 1)"}
+                return {"reply": f"짭만세 : 삭제에러: {str(e)[:30]}"}
+        return {"reply": "짭만세 : 삭제할 번호 숫자로 써줘 (예: /짭태양 기억삭제 1)"}
 
-    if user_input.startswith("/기억 "):
-        mem_text = user_input.replace("/기억 ", "", 1).strip()
+    # 기억 저장: "/짭태양 기억 [내용]" 지원
+    if clean_msg.startswith("기억 ") or clean_msg.startswith("/기억 "):
+        mem_text = re.sub(r"^/?기억\s+", "", clean_msg).strip()
         if mem_text:
             try:
                 db.save_memory(conversation_key, mem_text)
-                return {"reply": f"오키 기억해둠 ㅋㅋㅋㅋ : {mem_text}"}
+                return {"reply": f"짭만세 : 오키 기억해둠 ㅋㅋㅋㅋ : {mem_text}"}
             except Exception as e:
-                return {"reply": f"저장에러: {str(e)[:30]}"}
+                return {"reply": f"짭만세 : 저장에러: {str(e)[:30]}"}
 
-    # 4. 일반 대화 처리 (짭만세)
-    if not user_input:
-        user_input = "뭐해 ㅋㅋㅋㅋ"
+    # 2. 일반 대화 처리
+    user_input = clean_msg if clean_msg else "뭐해 ㅋㅋㅋㅋ"
 
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
@@ -166,11 +162,15 @@ def reply_chat(req: ChatRequest):
                 max_output_tokens=70,
             )
         )
-        reply = response.text.replace("\n", " ").strip() if response.text else "뭐임 ㅋㅋㅋㅋ"
+        ai_raw_reply = response.text.replace("\n", " ").strip() if response.text else "뭐임 ㅋㅋㅋㅋ"
     except Exception as e:
-        reply = f"에러: {str(e)[:50]}"
+        ai_raw_reply = f"에러: {str(e)[:50]}"
 
+    # DB에는 순수 발화만 저장
     db.save_message(conversation_key, sender_name, user_input)
-    db.save_message(conversation_key, "만세", reply)
+    db.save_message(conversation_key, "만세", ai_raw_reply)
 
-    return {"reply": reply}
+    # 카톡방 출력 시에만 '짭만세 : ' 접두어 부착
+    final_reply = f"짭만세 : {ai_raw_reply}"
+
+    return {"reply": final_reply}
