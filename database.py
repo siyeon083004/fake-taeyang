@@ -82,8 +82,38 @@ def get_random_style_samples(n: int = 12):
     return [r[0] for r in rows]
 
 
+def get_relevant_style_samples(user_input: str, n: int = 12):
+    """
+    지금 들어온 메시지와 겹치는 단어가 있는 말투 샘플을 우선으로 가져오고,
+    부족한 만큼은 랜덤으로 채운다 (완전한 의미 검색은 아니지만, 무작위보다는 지금 상황에 맞는 표현이 걸릴 확률이 높아짐).
+    """
+    import re as _re
+    words = [w for w in _re.split(r"\s+", user_input) if len(w) >= 2][:5]
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    relevant = []
+    if words:
+        like_clauses = " OR ".join(["message LIKE ?"] * len(words))
+        params = [f"%{w}%" for w in words]
+        cursor.execute(
+            f"SELECT message FROM style_samples WHERE {like_clauses} ORDER BY RANDOM() LIMIT ?",
+            params + [n // 2]
+        )
+        relevant = [r[0] for r in cursor.fetchall()]
+
+    remaining = n - len(relevant)
+    if remaining > 0:
+        cursor.execute("SELECT message FROM style_samples ORDER BY RANDOM() LIMIT ?", (remaining,))
+        relevant += [r[0] for r in cursor.fetchall()]
+
+    conn.close()
+    return relevant
+
+
 def save_style_sample(text: str):
-    """이태양이 실제로 오늘 한 말을 말투 학습 데이터로 추가한다 (/말투 명령어용)."""
+    """이태양이 실제로 오늘 한 말을 말투 학습 데이터로 추가한다 (자동/수동 공용)."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO style_samples (message) VALUES (?)", (text,))
