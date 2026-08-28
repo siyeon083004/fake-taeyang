@@ -27,7 +27,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 KST = timezone(timedelta(hours=9))
 
 # 항상 이 모델을 씁니다 (속도보다 답변 품질/문맥 이해를 우선함)
-MODEL_NAME = "gemini-3.6-flash"
+# 너무 최신 모델(3.6)에서 '생각 흔적'이 답변에 새어나오는 문제가 있어서, 더 검증된 모델로 사용합니다.
+MODEL_NAME = "gemini-3.1-flash"
 
 SELF_NAME_KEYWORD = "이태양"  # 이태양 본인 닉네임에는 항상 이 단어가 들어있음
 SELF_ID = "본인"
@@ -107,6 +108,24 @@ def is_deep_topic(text: str) -> bool:
 def is_meaningful_style_sample(text: str) -> bool:
     """'ㅋㅋㅋ', '??', 'ㅜㅜ' 처럼 리액션만 있는 문장은 말투 학습 데이터로 큰 의미가 없어서 거른다."""
     return len(text) >= 2 and bool(HANGUL_SYLLABLE.search(text))
+
+
+LEAK_PATTERNS = ["constraints check", "system prompt", "policy", "disallowed", "as an ai", "i cannot", "i can't"]
+
+
+def sanitize_reply(text: str) -> str:
+    """AI의 '생각 흔적'이나 영어 메타 텍스트가 새어나온 경우 걸러내고 무난한 대답으로 대체한다."""
+    lowered = text.lower()
+    if any(p in lowered for p in LEAK_PATTERNS):
+        return "어 잠깐만 뭐라는거야 다시말해줘ㅋㅋ"
+
+    # 한글이 거의 없고 영어(알파벳)만 잔뜩인 경우도 이상 응답으로 취급
+    hangul_count = len(HANGUL_SYLLABLE.findall(text))
+    alpha_count = len(re.findall(r"[a-zA-Z]", text))
+    if alpha_count >= 8 and hangul_count == 0:
+        return "어 잠깐만 뭐라는거야 다시말해줘ㅋㅋ"
+
+    return text
 
 
 def resolve_friend(sender: str):
@@ -214,9 +233,11 @@ def reply_chat(req: ChatRequest):
                 system_instruction=system_instruction,
                 temperature=0.7,
                 max_output_tokens=220 if deep_mode else 120,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),  # 생각 과정 텍스트가 답변에 새어나오는 걸 막기 위해 끔
             )
         )
         reply = response.text.replace("\n", " ").strip() if response.text else "어왜그래ㅋ"
+        reply = sanitize_reply(reply)
     except Exception as e:
         reply = f"에러: {str(e)[:60]}"
 
