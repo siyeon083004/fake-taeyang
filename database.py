@@ -85,7 +85,7 @@ def get_random_style_samples(n: int = 12):
 def get_relevant_style_samples(user_input: str, n: int = 12):
     """
     지금 들어온 메시지와 겹치는 단어가 있는 말투 샘플을 우선으로 가져오고,
-    부족한 만큼은 랜덤으로 채운다 (완전한 의미 검색은 아니지만, 무작위보다는 지금 상황에 맞는 표현이 걸릴 확률이 높아짐).
+    부족한 만큼은 랜덤으로 채운다.
     """
     import re as _re
     words = [w for w in _re.split(r"\s+", user_input) if len(w) >= 2][:5]
@@ -112,6 +112,34 @@ def get_relevant_style_samples(user_input: str, n: int = 12):
     return relevant
 
 
+def search_knowledge(query: str, limit: int = 6):
+    """
+    사용자 질문 속 주요 키워드를 바탕으로 과거 대화 데이터에서 배경 사실/정보를 검색한다.
+    """
+    import re as _re
+    stop_words = {"이태양", "짭태양", "누구", "뭐야", "어때", "진짜", "어디", "무슨", "누구야", "알아"}
+    words = [w for w in _re.findall(r'[가-힣a-zA-Z0-9]{2,}', query) if w not in stop_words]
+    if not words:
+        return []
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    conditions = " OR ".join(["message LIKE ?" for _ in words])
+    params = [f"%{w}%" for w in words]
+
+    cursor.execute(f"""
+        SELECT message FROM style_samples 
+        WHERE {conditions} 
+        ORDER BY RANDOM() 
+        LIMIT ?
+    """, (*params, limit))
+
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
 def save_style_sample(text: str):
     """이태양이 실제로 오늘 한 말을 말투 학습 데이터로 추가한다 (자동/수동 공용)."""
     conn = sqlite3.connect(DB_FILE)
@@ -119,6 +147,7 @@ def save_style_sample(text: str):
     cursor.execute("INSERT OR IGNORE INTO style_samples (message) VALUES (?)", (text,))
     conn.commit()
     conn.close()
+
 
 def save_message(user_id: str, sender: str, content: str):
     """메시지 1건 저장"""
@@ -130,6 +159,7 @@ def save_message(user_id: str, sender: str, content: str):
     )
     conn.commit()
     conn.close()
+
 
 def get_recent_messages(user_id: str, limit: int = 6):
     """최근 대화 N개 불러오기"""
@@ -144,6 +174,7 @@ def get_recent_messages(user_id: str, limit: int = 6):
     rows.reverse()
     return rows
 
+
 def save_memory(user_id: str, memory_text: str):
     """중요 기억 추가"""
     conn = sqlite3.connect(DB_FILE)
@@ -154,6 +185,7 @@ def save_memory(user_id: str, memory_text: str):
     )
     conn.commit()
     conn.close()
+
 
 def get_memories(user_id: str):
     """해당 유저에 대한 모든 기억 불러오기 (텍스트 리스트)"""
@@ -167,6 +199,7 @@ def get_memories(user_id: str):
     conn.close()
     return [r[0] for r in rows]
 
+
 def get_memories_with_id(user_id: str):
     """해당 유저의 기억 번호(ID)와 내용 함께 불러오기"""
     conn = sqlite3.connect(DB_FILE)
@@ -178,6 +211,7 @@ def get_memories_with_id(user_id: str):
     rows = cursor.fetchall()
     conn.close()
     return rows
+
 
 def delete_memory_by_id(user_id: str, memory_id: int):
     """특정 번호의 기억 삭제"""
@@ -192,5 +226,5 @@ def delete_memory_by_id(user_id: str, memory_id: int):
     conn.close()
     return affected > 0
 
-# DB 초기 세팅 실행
+
 init_db()
