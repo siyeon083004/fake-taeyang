@@ -27,8 +27,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 KST = timezone(timedelta(hours=9))
 
 # 항상 이 모델을 씁니다 (속도보다 답변 품질/문맥 이해를 우선함)
-# 너무 최신 모델(3.6)에서 '생각 흔적'이 답변에 새어나오는 문제가 있어서, 더 검증된 모델로 사용합니다.
-MODEL_NAME = "gemini-3.1-flash"
+# 확실히 작동하는 걸로 확인된 모델을 사용합니다. (3.x대 최신 모델명은 계정에서 아직 지원 안 할 수 있어서 안전하게 2.5-flash로 사용)
+MODEL_NAME = "gemini-2.5-flash"
 
 SELF_NAME_KEYWORD = "이태양"  # 이태양 본인 닉네임에는 항상 이 단어가 들어있음
 SELF_ID = "본인"
