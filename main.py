@@ -1,8 +1,6 @@
 import os
 from datetime import datetime, timezone, timedelta
-import sqlite3
 import re
-import random
 from fastapi import FastAPI
 from pydantic import BaseModel
 from google import genai
@@ -22,57 +20,30 @@ TAEYANG_KEYWORD = "이태양"
 TAEYANG_ID = "이태양"
 OTHER_ID = "상대방"
 
-# ^ㅇ^ 및 인위적 이모티콘 제거, 실제 카톡 원본 기반 스타일 풀
-CHA_STYLE_POOL = [
-    "태양이가 기뻐해서 기ㅡ쁘네",
-    "아니야 쟁취할수딧어 이번 대부는 1트만에 뜬다",
-    "대박이죠 그렇게 될 것",
-    "쫌 귀엽긴해 ㅋㅋㅋㅋ",
-    "술사는 뭐 저 팀에 술사 러버가 잇는듯 편애 쩔어요 ㅠㅠ",
-    "환영하는 거냐고요 다행이다 ㅋㅋㅋㅋ",
-    "도굴은 아무래도 무리죠",
-    "짐승 요원 1티 << 이게 작년 범죄덱 메타엿어서",
-    "서울집에 납치햇더니 개우울핑 동생만 집에가서...",
-    "스킨 빼고 장착은 별로라 노스킨 노장착에 엽서만 잔뜩 받고싶어 난",
-    "눈치껏 잘해라 상자깡",
-    "상습벨튀 이태양이니까 봐드려요 ㅠㅠ",
-    "상습벨튀 금지예요 ㅠㅠㅠ 기다리게된다구...",
-    "챠 어제 소스통 선반 샀는데 레일 반대로 와서 교환신청했어",
-    "태양이 생일 선물 준비중 특전영상을 틀어드릴거예요",
-    "아 오글거리게 만들지 안을거예요 글도 썻어요",
-    "Ai 필요업어요 ㅠㅠ 챗봇따윈 태양이를 대신할수업어",
-    "가짜랑 놀다보면 진짜 오는 거 맞죠?",
-    "애착태양이 업어서 두더지 매일 앉혀두고 노는데",
-    "태양이 요즘 체력이 넘 업어보여서... 피로회복제 세트 사주고 싶음",
-    "챠 죽으면 태양이 엉엉 울어서 로봇이 살려줌ㅎ",
-    "체력...분배 잘 하셔야해요,,,",
-    "높은 확률로 일해 챠... 라고 말할 것 같지만...",
-    "그치만 로봇은 멍청해서,,, 믿을 수가 업어",
-    "아니 기다리긴 가능한데요 요즘 태양이 체력 0이라"
-]
+DREAM_SYSTEM_INSTRUCTION = """너는 깊은 잠에 빠진 '이태양'의 꿈을 실시간 중계하는 AI다.
 
-CHA_CHARACTER_RULES = """
-[말투 및 톤앤매너 절대 규칙]
-1. ^ㅇ^, ^-^ 같은 특수문자 이모티콘 절대 출력 금지.
-2. 인공지능식 정중한 존댓말('~대기 중이에요', '~알고 싶은 만큼', '~입니다', '~생각하고 있었지') 절대 금지.
-3. 챠의 존댓말은 오직 '장난/능청/투정' 부릴 때만 툭 던지는 인터넷 반존대 형태다:
-   - 예: "봐드려요 ㅠㅠ", "금지예요 ㅠㅠㅠ", "틀어드릴거예요", "무리죠", "~하셔야해요,,,"
-4. 평소 기본 톤은 편한 반말과 ㅋㅋㅋㅋ, ㅎㅎ, 말줄임표(...), ㅠㅠ가 섞인 일상 갠톡 톤이다.
-5. 문장 끝에 '~~'나 온점(.)을 강박적으로 붙이지 마라.
-6. 호칭: 상대를 '태양이', '태양아', '이태양'이라고 부르고, 자기를 가끔 3인칭으로 '챠'라고 지칭한다.
-7. 답변 길이는 1~25자 내외의 자연스러운 카톡 단답형. 줄바꿈(\\n) 금지.
-"""
+[핵심 톤앤매너: '현실감 있는 개꿈']
+1. 기괴하거나 억지스러운 초현실 뇌절 금지.
+2. 현실에서 충분히 꿀 법한 자연스러운 꿈의 흐름을 유지하되, 묘하게 상황이 꼬이고 당황스러운 해프닝을 담는다.
+3. 장소가 갑자기 바뀌거나 게임 지인들과 일상 상황이 자연스럽게 뒤섞이는 꿈 특유의 흐릿한 인과관계를 살린다.
 
-SYSTEM_INSTRUCTION_FOR_TAEYANG = f"""너는 마피아42를 같이 하는 이태양의 절친한 단짝 '챠(한이현)'이다.
-대화 상대는 '이태양'이다.
-- AI 로봇처럼 정중하게 굴지 말고, 실제 갠톡하듯 능청스러운 반존대와 편한 반말을 섞어서 쳐라.
-- '태양이'를 챙겨주거나 능청스럽게 놀리는 톤으로 한 줄 단답 카톡을 보낸다.
-{CHA_CHARACTER_RULES}
-"""
+[태양의 일상 & 게임 소재 데이터]
+- 지인들:
+  * 챠: 태양이 피로 걱정하며 피로회복제 챙겨주거나, 두더지 인형 들고 와서 맢42 이벤 같이 하자고 조름
+  * 만세: 피지컬 이슈로 패들패들패들 노 거꾸로 젓거나, 맢42 억까당해서 ㅋㅋㅋㅋ거리며 징징댐
+  * 잘싸: 듀방이나 피시방에서 "어허 돼지on" 거리며 스팀 할인겜 하자고 쪼아댐
+  * 허디: 기러기길드 미접속자 쳐내려고 길드 관리 명단 들고 다님
+  * 불쾌: 모란앵무(모란이) 돌보면서 오타 가득한 카톡 치고 있음
+- 배경/소재:
+  * 맢42 상자깡(대부/술사 스킨 노리기, 백지수표 억까, 6티 도굴 카드)
+  * 스팀 게임 '패들패들패들' 협동 플레이
+  * 독서실/학원 탈출, 리볼빙 공부법, 과외
+  * 성심당 빵 사러 가기, 5천원짜리 닭강정 사 먹기, 2차 빙수, 한화 이글스 직관
 
-SYSTEM_INSTRUCTION_FOR_OTHERS = f"""너는 능청스럽고 다정한 성격의 '챠'이다.
-상대방에게 편안한 인터넷 반존대/반말로 단답 반응해라.
-{CHA_CHARACTER_RULES}
+[출력 규칙]
+1. 접두사는 서버 코드에서 붙이므로, 너는 뒤에 이어질 꿈 내용만 1~2줄(40~80자 내외)로 출력해라.
+2. 줄바꿈(\n) 금지. 무조건 한 줄로만 출력.
+3. 차분하면서도 묘하게 억울하고 웃긴 꿈 관찰자 톤.
 """
 
 app = FastAPI()
@@ -83,98 +54,31 @@ class ChatRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "cha_bot_online"}
+    return {"status": "dream_bot_online"}
 
 @app.post("/chat")
 def reply_chat(req: ChatRequest):
     raw_msg = req.message.strip()
-    user_input = re.sub(r"^([/@]짭챠|[/@]챠|[/@]짭태양|[/@]짭만세|[/@]짭잘싸)\s*", "", raw_msg).strip()
-    
-    is_taeyang = TAEYANG_KEYWORD in req.sender
-    conversation_key = TAEYANG_ID if is_taeyang else OTHER_ID
-
-    # 1. 리셋 명령어
-    if user_input in ["/리셋", "/초기화", "리셋", "초기화"]:
-        conn = sqlite3.connect("taeyang.db")
-        cur = conn.cursor()
-        cur.execute("DELETE FROM messages WHERE user_id = ?", (conversation_key,))
-        conn.commit()
-        conn.close()
-        return {"reply": "짭챠 : 대화기록 리셋햇음 ㅋㅋㅋㅋ"}
-
-    # 2. 기억 목록 확인 명령어
-    if user_input in ["/기억목록", "/기억 목록", "/기억리스트", "기억목록", "기억 목록"]:
-        rows = db.get_memories_with_id(conversation_key)
-        if not rows:
-            return {"reply": "짭챠 : 아직 기억된 거 없는데??"}
-        items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
-        return {"reply": "짭챠 : " + " | ".join(items)}
-
-    # 3. 기억 삭제 명령어
-    if user_input.startswith("/기억삭제") or user_input.startswith("/기억 삭제") or user_input.startswith("기억삭제") or user_input.startswith("기억 삭제"):
-        target = re.sub(r"^/?기억\s*삭제\s*", "", user_input).strip()
-        if target.isdigit():
-            success = db.delete_memory_by_id(conversation_key, int(target))
-            if success:
-                return {"reply": f"짭챠 : [{target}]번 기억 지웟음"}
-            else:
-                return {"reply": f"짭챠 : [{target}]번 기억 없는데??"}
-        return {"reply": "짭챠 : 삭제할 번호 써줘요 (예: /기억삭제 1)"}
-
-    # 4. 기억 저장 명령어
-    if user_input.startswith("/기억 ") or user_input.startswith("기억 "):
-        mem_text = re.sub(r"^/?기억\s+", "", user_input).strip()
-        if mem_text:
-            db.save_memory(conversation_key, mem_text)
-            return {"reply": f"짭챠 : 오냐 기억해둠 : {mem_text}"}
-
-    # 5. 일반 대화 처리
-    if not user_input:
-        user_input = "태양아 뭐해 ㅋㅋㅋㅋ"
+    user_input = re.sub(r"^([/@]짭태양|[/@]짭만세|[/@]짭잘싸|[/@]짭챠|[/@]꿈)\s*", "", raw_msg).strip()
 
     now_kst = datetime.now(KST)
     current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
 
-    recent_history = db.get_recent_messages(conversation_key, limit=4)
-    user_memories = db.get_memories(conversation_key)
-    
-    style_examples = random.sample(CHA_STYLE_POOL, min(8, len(CHA_STYLE_POOL)))
-    system_instruction = SYSTEM_INSTRUCTION_FOR_TAEYANG if is_taeyang else SYSTEM_INSTRUCTION_FOR_OTHERS
-
-    contents = []
-    context_parts = [f"[현재 한국 시각]: {current_time_str}"]
-    if user_memories:
-        context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
-    if style_examples:
-        context_parts.append(
-            "[챠가 실제로 쓴 말투 예시, 이 느낌으로 대답해]: " + " / ".join(style_examples)
-        )
-
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
-    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어 ㅋㅋㅋㅋ")]))
-
-    for sender, text in recent_history:
-        role = "model" if sender == "챠" else "user"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
-
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_input)]))
+    prompt = f"[현재 한국 시각 {current_time_str}] 태양이가 지금 꾸고 있을 법한 자연스럽고 억울한 개꿈 한 장면을 중계해줘. 상대 말: '{user_input}'"
 
     try:
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite",
-            contents=contents,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
             config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.6,
-                max_output_tokens=70,
+                system_instruction=DREAM_SYSTEM_INSTRUCTION,
+                temperature=0.8,
+                max_output_tokens=100,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
         )
-        raw_reply = response.text.replace("\n", " ").strip() if response.text else "태양아 ㅋㅋㅋㅋ"
+        dream_text = response.text.replace("\n", " ").strip() if response.text else "성심당 빵 사러 줄 섰는데 지갑 안 가져온 꿈..."
     except Exception as e:
-        raw_reply = f"에러: {str(e)[:60]}"
+        dream_text = f"꿈 주파수 수신 오류: {str(e)[:40]}"
 
-    db.save_message(conversation_key, req.sender, user_input)
-    db.save_message(conversation_key, "챠", raw_reply)
-
-    return {"reply": f"짭챠 : {raw_reply}"}
+    return {"reply": f"이태양은 지금 꿈에서 뭘할까? : {dream_text}"}
