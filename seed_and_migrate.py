@@ -38,6 +38,7 @@ def seed_identities(db):
     rows = [
         ("self", "kakaotalk", "이태양", 1),
         ("self", "kakaotalk", "본인", 0),
+        ("self", "kakaotalk", "태양", 0),   # 실제 카톡 표시 이름이 성 없이 "태양"으로만 뜨는 경우 대응
         ("cha", "kakaotalk", "챠", 1),
         ("cha", "kakaotalk", "한이현", 0),   # 챠의 실제 채팅방 잔용 이름
         ("cha", "kakaotalk", "Mo", 0),
