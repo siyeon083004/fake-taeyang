@@ -1,11 +1,10 @@
 """
 장산범 Persona Engine v2 초기화.
 
-주의:
-- 실제 사용자 이름을 코드에 하드코딩하지 않는다.
-- self는 person_key="self"라는 내부 ID만 사용한다.
-- 실제 카카오톡 표시 이름은 /이름 명령으로 연결한다.
-- 백호=배코 같은 채팅방 외 인물은 /인물 명령으로 등록한다.
+- self는 내부적으로 person_key="self" 사용
+- 실제 카카오톡 이름은 /이름 명령으로 연결
+- 챠 등의 기존 인물은 별도로 시딩
+- 기존 legacy DB는 삭제하지 않고 신규 DB로 복사
 """
 
 import sqlite3
@@ -31,7 +30,12 @@ from models import (
 LEGACY_DB_PATH = "taeyang.db"
 
 
+# ---------------------------------------------------------------------------
+# Persona
+# ---------------------------------------------------------------------------
+
 def get_or_create_persona(db):
+
     persona = (
         db.query(Persona)
         .filter_by(name="태양")
@@ -52,10 +56,16 @@ def get_or_create_persona(db):
     db.commit()
     db.refresh(persona)
 
-    print(f"[seed] persona 생성: id={persona.id}")
+    print(
+        f"[seed] persona 생성: id={persona.id}"
+    )
 
     return persona
 
+
+# ---------------------------------------------------------------------------
+# Person
+# ---------------------------------------------------------------------------
 
 def get_or_create_person(
     db,
@@ -67,14 +77,20 @@ def get_or_create_person(
 ):
     person = (
         db.query(Person)
-        .filter_by(person_key=person_key)
+        .filter_by(
+            person_key=person_key
+        )
         .first()
     )
 
     if person:
+
         changed = False
 
-        if canonical_name and person.canonical_name != canonical_name:
+        if (
+            canonical_name
+            and person.canonical_name != canonical_name
+        ):
             person.canonical_name = canonical_name
             changed = True
 
@@ -95,6 +111,7 @@ def get_or_create_person(
         person_key=person_key,
         canonical_name=canonical_name,
         person_type=person_type,
+        status="active",
         confirmed=1 if confirmed else 0,
         observed_in_chat=1 if observed else 0,
     )
@@ -106,7 +123,16 @@ def get_or_create_person(
     return person
 
 
-def add_alias(db, person, alias, source=Source.DIRECT_STATEMENT):
+# ---------------------------------------------------------------------------
+# Alias
+# ---------------------------------------------------------------------------
+
+def add_alias(
+    db,
+    person,
+    alias,
+    source=Source.DIRECT_STATEMENT,
+):
     alias = alias.strip()
 
     if not alias:
@@ -119,7 +145,11 @@ def add_alias(db, person, alias, source=Source.DIRECT_STATEMENT):
     )
 
     if existing:
-        return existing.person_id == person.id
+
+        if existing.person_id == person.id:
+            return True
+
+        return False
 
     db.add(
         PersonAlias(
@@ -131,10 +161,20 @@ def add_alias(db, person, alias, source=Source.DIRECT_STATEMENT):
     )
 
     db.commit()
+
     return True
 
 
-def add_identity(db, person, display_name, target_key=None):
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+def add_identity(
+    db,
+    person,
+    display_name,
+    target_key=None,
+):
     display_name = display_name.strip()
 
     if not display_name:
@@ -142,15 +182,23 @@ def add_identity(db, person, display_name, target_key=None):
 
     existing = (
         db.query(Identity)
-        .filter_by(display_name=display_name)
+        .filter_by(
+            display_name=display_name,
+            platform="kakaotalk",
+        )
         .first()
     )
 
     if existing:
+
         if existing.person_id != person.id:
             existing.person_id = person.id
-            existing.target_key = target_key or person.person_key
+            existing.target_key = (
+                target_key
+                or person.person_key
+            )
             existing.is_primary = 1
+
             db.commit()
 
         return True
@@ -158,7 +206,10 @@ def add_identity(db, person, display_name, target_key=None):
     db.add(
         Identity(
             person_id=person.id,
-            target_key=target_key or person.person_key,
+            target_key=(
+                target_key
+                or person.person_key
+            ),
             platform="kakaotalk",
             display_name=display_name,
             is_primary=1,
@@ -166,12 +217,20 @@ def add_identity(db, person, display_name, target_key=None):
     )
 
     db.commit()
+
     return True
 
 
+# ---------------------------------------------------------------------------
+# People
+# ---------------------------------------------------------------------------
+
 def seed_people(db):
-    # self라는 내부 ID만 만든다.
-    # 실제 이름/닉네임은 /이름으로 나중에 연결한다.
+
+    # 본인
+    #
+    # 실제 카카오톡 이름은 하드코딩하지 않는다.
+    # /이름 이태양 명령을 통해 self로 연결된다.
     self_person = get_or_create_person(
         db,
         person_key="self",
@@ -181,7 +240,7 @@ def seed_people(db):
         observed=False,
     )
 
-    # 챠는 기존 프로젝트에서 이미 정의된 canonical person.
+    # 챠
     cha_person = get_or_create_person(
         db,
         person_key="cha",
@@ -191,21 +250,42 @@ def seed_people(db):
         observed=False,
     )
 
-    # 기존에 알고 있던 챠 별칭만 유지.
-    add_alias(db, cha_person, "챠")
-    add_alias(db, cha_person, "한이현")
-    add_alias(db, cha_person, "Mo")
+    # 챠 별칭
+    add_alias(
+        db,
+        cha_person,
+        "챠",
+    )
 
-    # 중요:
-    # 실제 사용자 이름은 여기서 등록하지 않는다.
+    add_alias(
+        db,
+        cha_person,
+        "한이현",
+    )
 
-    return self_person, cha_person
+    add_alias(
+        db,
+        cha_person,
+        "Mo",
+    )
+
+    return (
+        self_person,
+        cha_person,
+    )
 
 
-def seed_identities(db, self_person, cha_person):
+# ---------------------------------------------------------------------------
+# Identities
+# ---------------------------------------------------------------------------
+
+def seed_identities(
+    db,
+    self_person,
+    cha_person,
+):
     """
-    안전한 별칭만 시딩.
-    실제 사용자의 카카오톡 표시 이름은 자동으로 넣지 않는다.
+    실제 사용자 이름은 여기서 등록하지 않는다.
     """
 
     add_identity(
@@ -230,8 +310,16 @@ def seed_identities(db, self_person, cha_person):
     )
 
 
-def seed_relationships(db, persona):
+# ---------------------------------------------------------------------------
+# Relationships
+# ---------------------------------------------------------------------------
+
+def seed_relationships(
+    db,
+    persona,
+):
     defaults = [
+
         dict(
             target_key="cha",
             relation_type="친구",
@@ -242,6 +330,7 @@ def seed_relationships(db, persona):
             nickname="챠",
             shared_history="마피아42 게임에서 알게 됨",
         ),
+
         dict(
             target_key="self",
             relation_type="본인",
@@ -255,6 +344,7 @@ def seed_relationships(db, persona):
     ]
 
     for data in defaults:
+
         existing = (
             db.query(PersonaRelationship)
             .filter_by(
@@ -277,34 +367,137 @@ def seed_relationships(db, persona):
     db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Initial Persona Items
+# ---------------------------------------------------------------------------
+
 INITIAL_SEED_ITEMS = [
-    (PersonaCategory.IDENTITY, "age", "21살"),
-    (PersonaCategory.IDENTITY, "status", "대학교 휴학 중, 공무원 시험 준비"),
 
-    (PersonaCategory.LIFESTYLE, "study", "행정법/국어 공부 중"),
-    (PersonaCategory.LIFESTYLE, "work", "과외 알바"),
-    (PersonaCategory.LIFESTYLE, "work", "쿠팡 심야 알바"),
-    (PersonaCategory.IDENTITY, "location", "대전 거주"),
+    (
+        PersonaCategory.IDENTITY,
+        "age",
+        "21살",
+    ),
 
-    (PersonaCategory.PREFERENCE, "game", "마피아42 고인물"),
-    (PersonaCategory.PREFERENCE, "game", "마피아42 이벤트/랭크에 높은 관심"),
-    (PersonaCategory.PREFERENCE, "game", "프로젝트 세카이 관심"),
-    (PersonaCategory.PREFERENCE, "character", "미즈키/에나 선호"),
-    (PersonaCategory.PREFERENCE, "entertainment", "잠뜰TV 및 미수반 관심"),
+    (
+        PersonaCategory.IDENTITY,
+        "status",
+        "대학교 휴학 중, 공무원 시험 준비",
+    ),
 
-    (PersonaCategory.OPINION, "game_social", "게임 내 친목질에 부정적"),
-    (PersonaCategory.OPINION, "game_social", "랜덤 연애(랜연)에 부정적"),
+    (
+        PersonaCategory.LIFESTYLE,
+        "study",
+        "행정법/국어 공부 중",
+    ),
 
-    (PersonaCategory.PERSONALITY, "temperament", "현실주의적"),
-    (PersonaCategory.PERSONALITY, "temperament", "까칠하고 시니컬한 성향"),
+    (
+        PersonaCategory.LIFESTYLE,
+        "work",
+        "과외 알바",
+    ),
 
-    (PersonaCategory.HUMOR, "teasing", "팩트로 상대를 찌르는 농담"),
-    (PersonaCategory.BEHAVIOR, "teasing", "친한 사람에게 거리낌 없이 놀림"),
+    (
+        PersonaCategory.LIFESTYLE,
+        "work",
+        "쿠팡 심야 알바",
+    ),
 
-    (PersonaCategory.SPEECH, "sentence_length", "카톡식 짧은 문장"),
-    (PersonaCategory.SPEECH, "endings", "반말"),
-    (PersonaCategory.SPEECH, "laughter", "ㅋㅋ / ㅋㅎㅋㅎ 등의 웃음 표현"),
-    (PersonaCategory.SPEECH, "reaction_words", "ㅡㅡ / ㅉㅉ / ㅎ;; 등의 반응"),
+    (
+        PersonaCategory.IDENTITY,
+        "location",
+        "대전 거주",
+    ),
+
+    (
+        PersonaCategory.PREFERENCE,
+        "game",
+        "마피아42 고인물",
+    ),
+
+    (
+        PersonaCategory.PREFERENCE,
+        "game",
+        "마피아42 이벤트/랭크에 높은 관심",
+    ),
+
+    (
+        PersonaCategory.PREFERENCE,
+        "game",
+        "프로젝트 세카이 관심",
+    ),
+
+    (
+        PersonaCategory.PREFERENCE,
+        "character",
+        "미즈키/에나 선호",
+    ),
+
+    (
+        PersonaCategory.PREFERENCE,
+        "entertainment",
+        "잠뜰TV 및 미수반 관심",
+    ),
+
+    (
+        PersonaCategory.OPINION,
+        "game_social",
+        "게임 내 친목질에 부정적",
+    ),
+
+    (
+        PersonaCategory.OPINION,
+        "game_social",
+        "랜덤 연애(랜연)에 부정적",
+    ),
+
+    (
+        PersonaCategory.PERSONALITY,
+        "temperament",
+        "현실주의적",
+    ),
+
+    (
+        PersonaCategory.PERSONALITY,
+        "temperament",
+        "까칠하고 시니컬한 성향",
+    ),
+
+    (
+        PersonaCategory.HUMOR,
+        "teasing",
+        "팩트로 상대를 찌르는 농담",
+    ),
+
+    (
+        PersonaCategory.BEHAVIOR,
+        "teasing",
+        "친한 사람에게 거리낌 없이 놀림",
+    ),
+
+    (
+        PersonaCategory.SPEECH,
+        "sentence_length",
+        "카톡식 짧은 문장",
+    ),
+
+    (
+        PersonaCategory.SPEECH,
+        "endings",
+        "반말",
+    ),
+
+    (
+        PersonaCategory.SPEECH,
+        "laughter",
+        "ㅋㅋ / ㅋㅎㅋㅎ 등의 웃음 표현",
+    ),
+
+    (
+        PersonaCategory.SPEECH,
+        "reaction_words",
+        "ㅡㅡ / ㅉㅉ / ㅎ;; 등의 반응",
+    ),
 
     (
         PersonaCategory.EMOTION,
@@ -314,7 +507,10 @@ INITIAL_SEED_ITEMS = [
 ]
 
 
-def seed_initial_persona_items(db, persona):
+def seed_initial_persona_items(
+    db,
+    persona,
+):
     existing = (
         db.query(PersonaItem)
         .filter_by(
@@ -325,10 +521,17 @@ def seed_initial_persona_items(db, persona):
     )
 
     if existing:
-        print(f"[seed] 초기 persona item 존재: {existing}개")
+        print(
+            f"[seed] 초기 persona item 존재: {existing}개"
+        )
         return
 
-    for category, subcategory, content in INITIAL_SEED_ITEMS:
+    for (
+        category,
+        subcategory,
+        content,
+    ) in INITIAL_SEED_ITEMS:
+
         db.add(
             PersonaItem(
                 persona_id=persona.id,
@@ -345,34 +548,64 @@ def seed_initial_persona_items(db, persona):
     db.commit()
 
     print(
-        f"[seed] 초기 persona item {len(INITIAL_SEED_ITEMS)}개 생성"
+        f"[seed] 초기 persona item "
+        f"{len(INITIAL_SEED_ITEMS)}개 생성"
     )
 
 
-def migrate_legacy_messages_and_memories(db, persona):
+# ---------------------------------------------------------------------------
+# Legacy Migration
+# ---------------------------------------------------------------------------
+
+def migrate_legacy_messages_and_memories(
+    db,
+    persona,
+):
     """
-    기존 legacy DB를 신규 구조로 복사.
-    원본은 삭제하지 않는다.
+    기존 taeyang.db 데이터를 신규 DB로 복사한다.
+
+    원본 legacy 데이터는 삭제하지 않는다.
     """
 
     try:
-        conn = sqlite3.connect(LEGACY_DB_PATH)
+
+        conn = sqlite3.connect(
+            LEGACY_DB_PATH
+        )
+
         cur = conn.cursor()
+
     except Exception as e:
-        print(f"[migrate] legacy DB 접근 실패: {e}")
+
+        print(
+            f"[migrate] legacy DB 접근 실패: {e}"
+        )
+
         return
+
+    # ---------------------------------------------------------
+    # Messages
+    # ---------------------------------------------------------
 
     already = (
         db.query(Conversation)
-        .filter_by(room_id="legacy_migration")
+        .filter_by(
+            room_id="legacy_migration"
+        )
         .first()
     )
 
     if not already:
+
         try:
+
             cur.execute(
                 """
-                SELECT user_id, sender, content, created_at
+                SELECT
+                    user_id,
+                    sender,
+                    content,
+                    created_at
                 FROM messages
                 ORDER BY id ASC
                 """
@@ -381,12 +614,23 @@ def migrate_legacy_messages_and_memories(db, persona):
             rows = cur.fetchall()
 
         except sqlite3.OperationalError:
+
             rows = []
 
         count = 0
 
-        for user_id, sender, content, created_at in rows:
-            target = user_id or sender or "unknown"
+        for (
+            user_id,
+            sender,
+            content,
+            created_at,
+        ) in rows:
+
+            target = (
+                user_id
+                or sender
+                or "unknown"
+            )
 
             db.add(
                 Conversation(
@@ -404,20 +648,31 @@ def migrate_legacy_messages_and_memories(db, persona):
         db.commit()
 
         print(
-            f"[migrate] legacy messages {count}건 복사 완료"
+            f"[migrate] legacy messages "
+            f"{count}건 복사 완료"
         )
+
+    # ---------------------------------------------------------
+    # Memories
+    # ---------------------------------------------------------
 
     already_memory = (
         db.query(Memory)
-        .filter_by(context="legacy_migration")
+        .filter_by(
+            context="legacy_migration"
+        )
         .first()
     )
 
     if not already_memory:
+
         try:
+
             cur.execute(
                 """
-                SELECT user_id, memory_text
+                SELECT
+                    user_id,
+                    memory_text
                 FROM memories
                 ORDER BY id ASC
                 """
@@ -426,12 +681,20 @@ def migrate_legacy_messages_and_memories(db, persona):
             rows = cur.fetchall()
 
         except sqlite3.OperationalError:
+
             rows = []
 
         count = 0
 
-        for user_id, memory_text in rows:
-            target = user_id or "unknown"
+        for (
+            user_id,
+            memory_text,
+        ) in rows:
+
+            target = (
+                user_id
+                or "unknown"
+            )
 
             db.add(
                 Memory(
@@ -451,21 +714,31 @@ def migrate_legacy_messages_and_memories(db, persona):
         db.commit()
 
         print(
-            f"[migrate] legacy memories {count}건 복사 완료"
+            f"[migrate] legacy memories "
+            f"{count}건 복사 완료"
         )
 
     conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
 def run():
+
     init_db()
 
     db = SessionLocal()
 
     try:
+
         persona = get_or_create_persona(db)
 
-        self_person, cha_person = seed_people(db)
+        (
+            self_person,
+            cha_person,
+        ) = seed_people(db)
 
         seed_identities(
             db,
@@ -489,9 +762,12 @@ def run():
         )
 
     finally:
+
         db.close()
 
-    print("[seed] Persona Engine v2 초기화 완료")
+    print(
+        "[seed] Persona Engine v2 초기화 완료"
+    )
 
 
 if __name__ == "__main__":
