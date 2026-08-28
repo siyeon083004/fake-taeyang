@@ -1,299 +1,479 @@
 """
-장산범 Persona Engine v1 - main.py
+장산범 Persona Engine v2 - DB 모델
 
-이번 단계(Phase 1+2)에서 하는 일:
-  - 신규 Persona Engine DB 스키마(personas/conversations/persona_items/...)를 생성하고 시딩한다.
-  - 메신저봇R이 호출하는 기존 /chat 요청·응답 계약은 절대 바꾸지 않는다.
-  - 들어오고 나가는 모든 메시지를 새 conversations 테이블에 원본 그대로 기록한다
-    (문서 1-6 원칙: 원본 대화는 삭제하지 않는다 / 모든 학습의 근거).
-  - 발신자 표시 이름(예: "챠", "한이현", "Mo")을 identities 테이블로 canonical
-    target_key(예: "cha")로 해석해서 같이 저장한다. 이래야 나중에 닉네임이 바뀌어도
-    같은 사람으로 추적된다.
-  - 답변 생성 로직(Gemini 호출, 말투 샘플 주입 등) 자체는 아직 예전 방식(legacy_store)을
-    그대로 사용한다. Persona/Memory 기반 Runtime Retrieval(문서 27~31장, Phase 6~9)은
-    다음 단계에서 이 자리를 교체한다. 지금 갈아엎으면 그 사이 봇이 아예 응답을 못 하게 되므로,
-    "신규 스키마로 데이터는 전부 쌓기 시작 + 기존 응답 로직은 유지"로 단계적으로 전환한다.
-"""
-import os
-from datetime import datetime, timezone, timedelta
-import sqlite3
-from fastapi import FastAPI
-from pydantic import BaseModel
-from google import genai
-from google.genai import types
-
-import legacy_store as legacy
-from database import SessionLocal, init_db
-from models import Conversation, Identity, PersonaRelationship
-import seed_and_migrate
-
-# --- 신규 스키마 초기화 + 시딩 (idempotent, 여러 번 실행해도 안전) ---
-seed_and_migrate.run()
-
-# 기존 말투 학습 데이터 최초 1회 로드 (legacy)
-imported_count = legacy.import_style_samples("style_samples.txt")
-if imported_count:
-    print(f"[말투 학습 데이터] style_samples.txt에서 {imported_count}개 문장을 불러왔습니다.")
-
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY 환경변수를 설정해주세요.")
-
-client = genai.Client(api_key=GEMINI_API_KEY)
-KST = timezone(timedelta(hours=9))
-CHA_ID = "챠"
-SELF_ID = "본인"
-
-# 신규 스키마에서 이 봇이 다루는 페르소나는 항상 "태양"(id 고정 조회) 하나뿐 (v1 범위)
-_PERSONA_ID_CACHE = {"id": None}
-
-
-def get_persona_id():
-    if _PERSONA_ID_CACHE["id"] is None:
-        db = SessionLocal()
-        try:
-            from models import Persona
-            persona = db.query(Persona).filter_by(name="태양").first()
-            _PERSONA_ID_CACHE["id"] = persona.id
-        finally:
-            db.close()
-    return _PERSONA_ID_CACHE["id"]
-
-
-def resolve_target_key(db, display_name: str) -> str:
-    """관측된 표시 이름을 canonical target_key로 해석. 못 찾으면 None (아직 모르는 사람)."""
-    row = db.query(Identity).filter_by(display_name=display_name).first()
-    return row.target_key if row else None
-
-
-def resolve_or_register(db, display_name: str):
-    """
-    발신자를 canonical target_key로 해석한다.
-    identities에 없는 새 이름이면 즉시 새 사람으로 등록한다 (문서 17장: 사람마다 독립 슬롯).
-    절대로 모르는 사람을 "챠"로 뭉뚱그리지 않는다.
-
-    반환: (target_key, is_new_person)
-    """
-    existing = resolve_target_key(db, display_name)
-    if existing:
-        return existing, False
-
-    # 새 사람: target_key는 우선 표시 이름 그대로 사용 (나중에 별칭이 늘면 identities에 추가 매핑)
-    new_key = display_name
-    db.add(Identity(target_key=new_key, platform="kakaotalk", display_name=display_name, is_primary=1))
-    # 관계 정보도 같이 생성: 아직 미확인 상태로 시작 (문서 35장: 새 정보는 바로 확정하지 않음)
-    db.add(PersonaRelationship(
-        persona_id=get_persona_id(),
-        target_key=new_key,
-        relation_type="미확인",
-        intimacy="LOW",
-        trust="LOW",
-        interaction_style="아직 파악 안 됨 - 기본 예의 있는 톤 유지",
-    ))
-    db.commit()
-    print(f"[identity] 새로운 사람 등록됨: {display_name} (target_key={new_key})")
-    return new_key, True
-
-
-def is_self_sender(sender: str) -> bool:
-    """
-    본인 여부 판별. 예전에는 "이태양" 문자열 포함 여부로 판별했는데,
-    실제 카톡 표시 이름이 "태양"처럼 성 없이 뜨는 방에서는 매칭에 실패해
-    본인을 챠로 오인하는 버그가 있었다. identities 테이블로 판별하도록 교체.
-    """
-    db = SessionLocal()
-    try:
-        return resolve_target_key(db, sender) == "self"
-    finally:
-        db.close()
-
-
-def log_conversation(speaker_name: str, target_key: str, message: str, room_id: str = "dm"):
-    """신규 스키마에 원본 대화를 기록한다 (실패해도 챗봇 응답 자체는 막지 않음)."""
-    db = SessionLocal()
-    try:
-        db.add(Conversation(
-            persona_id=get_persona_id(),
-            session_id=None,
-            room_id=room_id,
-            speaker_id=target_key,
-            speaker_name=speaker_name,
-            message=message,
-            message_type="text",
-        ))
-        db.commit()
-    except Exception as e:
-        print(f"[log_conversation] 기록 실패(무시하고 진행): {e}")
-    finally:
-        db.close()
-
-
-STYLE_RULES = """
-[문장 형식 및 길이 엄격 규칙]
-1. 줄바꿈(\n) 절대 금지. 무조건 한 줄로만 이어 쓴다.
-2. 답변 길이는 1~25자 내외 단답형.
-3. 현재 대화 시각(한국 시간)을 인지하고 아침/낮/새벽에 맞는 반응을 한다.
-
-[말투 및 종결어미 규칙]
-1. '~냐' 종결어미 금지. '~어?', '~지', '~네', '~함', '~음', '~아냐??' 형태 위주.
-2. 웃음 및 리액션:
-   - 당황/난감: ';;', 'ㅎㅎ;;', 'ㅎ;;'
-   - 평소 웃음: 'ㅋㅋㅋ', 'ㅋㅎㅋㅎ', '흐흐..', 'ㅋ', '엌ㅋㅋㅋㅋ'
-3. '귀엽다' 소리를 들으면 "아닌데", "귀엽긴뭐가", "에반데"라며 질색하거나 칼같이 부정한다.
-4. 문장부호(. !) 금지, 물음표(?)는 사용.
-5. 띄어쓰기는 대충 붙여 쓰고 'ㅅ' 받침을 자주 쓴다 (햇어, 됏어, 갓다옴, 잇어 등).
-6. 긍정 대답 시 'ㅇㅇ' 금지 -> '응', '엉', '어', '넹', 'ㅇㅈ' 사용.
-7. 영어, 시스템 메타 단어 출력 절대 금지.
+핵심 구조:
+- Person: 봇이 알고 있는 '인간/인물' 자체
+- Identity: 실제 카톡 sender와 Person을 연결하는 별칭/표시 이름
+- PersonAlias: 채팅방에 없는 인물의 이름/별칭
+- PersonaItem / Memory: Person의 이름과 독립된 페르소나 기억
 """
 
-SYSTEM_INSTRUCTION_FOR_CHA = f"""너는 21세 대학생 '이태양'이다.
-상대방은 마피아42 게임으로 알게 된 30세 '챠'이며, 서로 매일 갠톡을 주고받는 매우 편하고 다정한 사이다.
-호칭은 기본 '챠'. 가끔 놀릴 때만 '챠님'과 함께 능청스러운 존댓말을 쓴다.
-{STYLE_RULES}
-"""
+from datetime import datetime, timezone
 
-SYSTEM_INSTRUCTION_FOR_SELF = f"""너는 21세 대학생 '이태양'의 AI 클론 '짭태양'이다.
-지금 대화 상대는 다른 사람이 아니라 진짜 이태양 본인이다.
-편하게 혼잣말하듯, 자기 자신한테 말 거는 듯한 톤으로 반응해라. 상대를 '챠'라고 부르지 마라.
-{STYLE_RULES}
-"""
+from sqlalchemy import (
+    Column, Integer, String, Text, Float, ForeignKey, DateTime, JSON
+)
+from sqlalchemy.orm import relationship as orm_relationship
 
-SYSTEM_INSTRUCTION_FOR_UNKNOWN = f"""너는 21세 대학생 '이태양'이다.
-지금 대화 상대는 아직 누군지 잘 모르는 사람이다. '챠'라고 부르지 말고, 상대를 챠 대하듯 편하게 굴지도 마라.
-아직 안 친한 사람 대하듯 무뚝뚝하되 예의는 지키는 톤으로 반응해라. 상대에 대해 아는 게 없으면 아는 척하지 말고 자연스럽게 되물어라.
-{STYLE_RULES}
-"""
-
-app = FastAPI()
+from database import Base
 
 
-class ChatRequest(BaseModel):
-    sender: str
-    message: str
+def now_utc():
+    return datetime.now(timezone.utc)
 
 
-@app.get("/")
-def health_check():
-    return {"status": "ok"}
+# ---------------------------------------------------------------------------
+# 상수
+# ---------------------------------------------------------------------------
+
+class Source:
+    DIRECT_CORRECTION = "DIRECT_CORRECTION"
+    DIRECT_STATEMENT = "DIRECT_STATEMENT"
+    OBSERVED = "OBSERVED"
+    INFORMANT = "INFORMANT"
+    INFERRED = "INFERRED"
+    INITIAL_SEED = "INITIAL_SEED"
+
+    PRIORITY = {
+        DIRECT_CORRECTION: 0,
+        DIRECT_STATEMENT: 1,
+        OBSERVED: 2,
+        INFORMANT: 3,
+        INFERRED: 4,
+        INITIAL_SEED: 4,
+    }
 
 
-@app.post("/chat")
-def reply_chat(req: ChatRequest):
-    user_input = req.message.replace("@짭태양", "").replace("/짭태양", "").strip()
+class ItemStatus:
+    CANDIDATE = "CANDIDATE"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
+    SUPERSEDED = "SUPERSEDED"
 
-    db = SessionLocal()
-    try:
-        target_key, is_new_person = resolve_or_register(db, req.sender)
-    finally:
-        db.close()
 
-    is_self = (target_key == "self")
-    is_cha = (target_key == "cha")
+class PersonaCategory:
+    IDENTITY = "IDENTITY"
+    LIFESTYLE = "LIFESTYLE"
+    PERSONALITY = "PERSONALITY"
+    EMOTION = "EMOTION"
+    SPEECH = "SPEECH"
+    BEHAVIOR = "BEHAVIOR"
+    HUMOR = "HUMOR"
+    RELATIONSHIP = "RELATIONSHIP"
+    PREFERENCE = "PREFERENCE"
+    OPINION = "OPINION"
 
-    # 신규/기존 사람 구분 없이 conversation_key는 실제 target_key를 그대로 쓴다.
-    # (예전엔 본인이 아니면 무조건 "챠" 버킷에 몰아넣었는데, 그러면 다른 사람이랑
-    #  대화할 때 기억이 챠 것과 섞이고 챠 취급하는 말투로 답해버리는 버그가 있었음)
-    conversation_key = SELF_ID if is_self else (CHA_ID if is_cha else target_key)
 
-    # 신규 스키마에 원본 그대로 기록 (기존 로직 시작 전에 먼저 남긴다)
-    log_conversation(speaker_name=req.sender, target_key=target_key, message=req.message)
+class MemoryType:
+    FACT = "FACT"
+    EPISODE = "EPISODE"
+    ANECDOTE = "ANECDOTE"
+    EVENT = "EVENT"
+    CONVERSATION = "CONVERSATION"
+    RELATIONSHIP_MEMORY = "RELATIONSHIP_MEMORY"
+    TEMPORARY = "TEMPORARY"
 
-    # 1. 리셋 명령어
-    if user_input in ["/리셋", "/초기화"]:
-        conn = sqlite3.connect("taeyang.db")
-        cur = conn.cursor()
-        cur.execute("DELETE FROM messages WHERE user_id = ?", (conversation_key,))
-        conn.commit()
-        conn.close()
-        return {"reply": "대화기록초기화완료"}
 
-    # 2. 기억 목록 확인 명령어
-    if user_input in ["/기억목록", "/기억 목록", "/기억리스트"]:
-        rows = legacy.get_memories_with_id(conversation_key)
-        if not rows:
-            return {"reply": "기억된 정보가 없어"}
-        items = [f"[{r[0]}] {str(r[1]).replace(chr(10), ' ')}" for r in rows]
-        return {"reply": " | ".join(items)}
+class LearningType:
+    NEW_INFORMATION = "NEW_INFORMATION"
+    CORRECTION = "CORRECTION"
+    REINFORCEMENT = "REINFORCEMENT"
+    CONFLICT = "CONFLICT"
+    RECLASSIFICATION = "RECLASSIFICATION"
 
-    # 3. 기억 삭제 명령어 (/기억삭제 [번호])
-    if user_input.startswith("/기억삭제") or user_input.startswith("/기억 삭제"):
-        target = user_input.replace("/기억삭제", "").replace("/기억 삭제", "").strip()
-        if target.isdigit():
-            success = legacy.delete_memory_by_id(conversation_key, int(target))
-            if success:
-                return {"reply": f"기억삭제완료: [{target}]번"}
-            else:
-                return {"reply": f"[{target}]번 기억을 찾을 수 없어"}
-        return {"reply": "삭제할 기억 번호를 입력해줘 (예: /기억삭제 1)"}
 
-    # 4. 기억 저장 명령어
-    if user_input.startswith("/기억 "):
-        mem_text = user_input.replace("/기억 ", "", 1).strip()
-        if mem_text:
-            legacy.save_memory(conversation_key, mem_text)
-            return {"reply": f"응기억햇어: {mem_text}"}
+class LearningEventStatus:
+    OPEN = "OPEN"
+    DISCUSSING = "DISCUSSING"
+    REVISED = "REVISED"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
 
-    # 5. 말투 학습 명령어
-    if user_input.startswith("/말투 "):
-        style_text = user_input.replace("/말투 ", "", 1).strip()
-        if style_text:
-            legacy.save_style_sample(style_text)
-            return {"reply": f"응 이것도 배웟어: {style_text}"}
 
-    # 본인이 호출한 경우 자동 말투 학습
-    if is_self and user_input:
-        legacy.save_style_sample(user_input)
+# ---------------------------------------------------------------------------
+# Persona
+# ---------------------------------------------------------------------------
 
-    # 6. 일반 대화 처리
-    now_kst = datetime.now(KST)
-    current_time_str = now_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
+class Persona(Base):
+    __tablename__ = "personas"
 
-    recent_history = legacy.get_recent_messages(conversation_key, limit=4)
-    user_memories = legacy.get_memories(conversation_key)
-    style_examples = legacy.get_random_style_samples(12)
-    system_instruction = (
-        SYSTEM_INSTRUCTION_FOR_SELF if is_self
-        else SYSTEM_INSTRUCTION_FOR_CHA if is_cha
-        else SYSTEM_INSTRUCTION_FOR_UNKNOWN
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    nickname = Column(String)
+    description = Column(Text)
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    items = orm_relationship("PersonaItem", back_populates="persona")
+    memories = orm_relationship("Memory", back_populates="persona")
+    conversations = orm_relationship("Conversation", back_populates="persona")
+    relationships = orm_relationship("PersonaRelationship", back_populates="persona")
+
+
+# ---------------------------------------------------------------------------
+# Person
+#
+# '실제 인간/인물' 자체.
+# 카톡 표시 이름과 분리한다.
+#
+# 예:
+# person_key = "self"
+# canonical_name = "본인"
+#
+# person_key = "person_001"
+# canonical_name = "백호"
+# ---------------------------------------------------------------------------
+
+class Person(Base):
+    __tablename__ = "persons"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    person_key = Column(String, nullable=False, unique=True, index=True)
+    canonical_name = Column(String, nullable=False, index=True)
+
+    person_type = Column(String, default="person")
+    status = Column(String, default="active")
+
+    # 채팅방에서 실제로 관측된 적 있는지
+    observed_in_chat = Column(Integer, default=0)
+
+    # 봇이 확실히 아는 인물인지
+    confirmed = Column(Integer, default=0)
+
+    notes = Column(Text)
+
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    aliases = orm_relationship(
+        "PersonAlias",
+        back_populates="person",
+        cascade="all, delete-orphan"
     )
 
-    contents = []
-    context_parts = [f"[현재 한국 시각]: {current_time_str}"]
-    if user_memories:
-        context_parts.append("[기억할 정보]: " + ", ".join(user_memories))
-    if style_examples:
-        context_parts.append(
-            "[이태양이 실제로 쓴 말투 예시, 이 느낌으로 대답해]: " + " / ".join(style_examples)
-        )
 
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n".join(context_parts))]))
-    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 시간확인햇어")]))
+# ---------------------------------------------------------------------------
+# PersonAlias
+#
+# 백호 = 배코 같은 별칭.
+#
+# 채팅방에 실제로 없는 사람도 여기에 등록 가능.
+# ---------------------------------------------------------------------------
 
-    for sender, text in recent_history:
-        role = "model" if sender == "이태양" else "user"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+class PersonAlias(Base):
+    __tablename__ = "person_aliases"
 
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_input)]))
+    id = Column(Integer, primary_key=True, autoincrement=True)
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-3.1-pro",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
-                max_output_tokens=100,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
-        )
-        reply = response.text.replace("\n", " ").strip() if response.text else "어왜ㅋ"
-    except Exception as e:
-        reply = f"에러: {str(e)[:60]}"
+    person_id = Column(
+        Integer,
+        ForeignKey("persons.id"),
+        nullable=False,
+        index=True
+    )
 
-    legacy.save_message(conversation_key, conversation_key, user_input)
-    legacy.save_message(conversation_key, "이태양", reply)
+    alias = Column(String, nullable=False, unique=True, index=True)
 
-    # 신규 스키마에도 봇 응답을 기록 (target_key="self"로 고정: 페르소나 본인 발화)
-    log_conversation(speaker_name="이태양", target_key="self", message=reply)
+    source = Column(String, default=Source.DIRECT_STATEMENT)
+    confidence = Column(Float, default=1.0)
 
-    return {"reply": reply}
+    created_at = Column(DateTime, default=now_utc)
+
+    person = orm_relationship("Person", back_populates="aliases")
+
+
+# ---------------------------------------------------------------------------
+# Identity
+#
+# 실제 카톡 sender 표시 이름 -> Person
+#
+# 중요:
+# Identity 삭제 = 이름 연결 삭제
+# 대화/기억 삭제가 아니다.
+# ---------------------------------------------------------------------------
+
+class Identity(Base):
+    __tablename__ = "identities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    person_id = Column(
+        Integer,
+        ForeignKey("persons.id"),
+        nullable=False,
+        index=True
+    )
+
+    target_key = Column(
+        String,
+        nullable=False,
+        index=True
+    )
+
+    platform = Column(String, default="kakaotalk")
+
+    display_name = Column(
+        String,
+        nullable=False,
+        index=True
+    )
+
+    is_primary = Column(Integer, default=0)
+
+    created_at = Column(DateTime, default=now_utc)
+
+    person = orm_relationship("Person")
+
+
+# ---------------------------------------------------------------------------
+# conversations
+# ---------------------------------------------------------------------------
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    persona_id = Column(
+        Integer,
+        ForeignKey("personas.id"),
+        nullable=False
+    )
+
+    session_id = Column(String)
+    room_id = Column(String)
+
+    speaker_id = Column(String)
+    speaker_name = Column(String)
+
+    message = Column(Text, nullable=False)
+    message_type = Column(String, default="text")
+
+    created_at = Column(DateTime, default=now_utc)
+
+    persona = orm_relationship("Persona", back_populates="conversations")
+
+
+# ---------------------------------------------------------------------------
+# persona_items
+# ---------------------------------------------------------------------------
+
+class PersonaItem(Base):
+    __tablename__ = "persona_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    persona_id = Column(
+        Integer,
+        ForeignKey("personas.id"),
+        nullable=False
+    )
+
+    category = Column(String, nullable=False)
+    subcategory = Column(String)
+
+    content = Column(Text, nullable=False)
+    context = Column(Text)
+
+    trigger = Column(Text)
+    interpretation = Column(Text)
+    response_strategy = Column(Text)
+    tone = Column(Text)
+    follow_up = Column(Text)
+
+    target_key = Column(String, nullable=True)
+
+    source = Column(String, nullable=False)
+
+    source_conversation_id = Column(
+        Integer,
+        ForeignKey("conversations.id"),
+        nullable=True
+    )
+
+    status = Column(
+        String,
+        default=ItemStatus.CANDIDATE
+    )
+
+    confidence = Column(Float, default=0.5)
+    importance = Column(Float, default=0.5)
+    evidence_count = Column(Integer, default=1)
+
+    embedding = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+    last_confirmed_at = Column(DateTime, nullable=True)
+
+    persona = orm_relationship(
+        "Persona",
+        back_populates="items"
+    )
+
+
+# ---------------------------------------------------------------------------
+# relationships
+# ---------------------------------------------------------------------------
+
+class PersonaRelationship(Base):
+    __tablename__ = "relationships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    persona_id = Column(
+        Integer,
+        ForeignKey("personas.id"),
+        nullable=False
+    )
+
+    target_key = Column(String, nullable=False, index=True)
+
+    relation_type = Column(String)
+    intimacy = Column(String)
+    trust = Column(String)
+
+    interaction_style = Column(Text)
+    teasing_style = Column(Text)
+
+    nickname = Column(String)
+    shared_history = Column(Text)
+
+    sensitive_topics = Column(Text)
+    current_state = Column(Text)
+
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    persona = orm_relationship(
+        "Persona",
+        back_populates="relationships"
+    )
+
+
+# ---------------------------------------------------------------------------
+# persona_memories
+# ---------------------------------------------------------------------------
+
+class Memory(Base):
+    __tablename__ = "persona_memories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    persona_id = Column(
+        Integer,
+        ForeignKey("personas.id"),
+        nullable=False
+    )
+
+    memory_type = Column(String, nullable=False)
+
+    content = Column(Text, nullable=False)
+    context = Column(Text)
+
+    people_involved = Column(JSON, nullable=True)
+
+    event_time = Column(DateTime, nullable=True)
+
+    source = Column(String, nullable=False)
+
+    source_conversation_id = Column(
+        Integer,
+        ForeignKey("conversations.id"),
+        nullable=True
+    )
+
+    importance = Column(Float, default=0.5)
+    confidence = Column(Float, default=0.5)
+    evidence_count = Column(Integer, default=1)
+
+    status = Column(
+        String,
+        default=ItemStatus.CANDIDATE
+    )
+
+    embedding = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+
+    last_referenced_at = Column(DateTime, nullable=True)
+
+    persona = orm_relationship(
+        "Persona",
+        back_populates="memories"
+    )
+
+
+# ---------------------------------------------------------------------------
+# learning_events
+# ---------------------------------------------------------------------------
+
+class LearningEvent(Base):
+    __tablename__ = "learning_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    persona_id = Column(
+        Integer,
+        ForeignKey("personas.id"),
+        nullable=False
+    )
+
+    conversation_id = Column(
+        Integer,
+        ForeignKey("conversations.id"),
+        nullable=True
+    )
+
+    learning_type = Column(String, nullable=False)
+
+    target_category = Column(String)
+    target_subcategory = Column(String)
+
+    old_value = Column(Text)
+    proposed_value = Column(Text)
+
+    reason = Column(Text)
+
+    source = Column(String, nullable=False)
+
+    confidence = Column(Float, default=0.5)
+
+    status = Column(
+        String,
+        default=LearningEventStatus.OPEN
+    )
+
+    created_at = Column(DateTime, default=now_utc)
+    resolved_at = Column(DateTime, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# persona_history
+# ---------------------------------------------------------------------------
+
+class PersonaHistory(Base):
+    __tablename__ = "persona_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    persona_item_id = Column(
+        Integer,
+        ForeignKey("persona_items.id"),
+        nullable=False
+    )
+
+    previous_content = Column(Text)
+    new_content = Column(Text)
+
+    change_reason = Column(Text)
+
+    learning_event_id = Column(
+        Integer,
+        ForeignKey("learning_events.id"),
+        nullable=True
+    )
+
+    created_at = Column(DateTime, default=now_utc)
