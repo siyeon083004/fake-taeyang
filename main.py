@@ -2718,4 +2718,3 @@ def reply_chat(
     return {
         "reply": reply
     }
-````
