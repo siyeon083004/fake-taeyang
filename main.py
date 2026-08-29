@@ -1,4 +1,3 @@
-````python
 """
 장산범 Persona Engine v2 - main.py
 
