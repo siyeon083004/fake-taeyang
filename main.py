@@ -1,23 +1,19 @@
-
 """
-장산범 Persona Engine v5 - main.py
+장산범 Persona Engine v6 - main.py
 
 핵심 구조
 - 짭태양의 기본 Persona는 하나
-- 상대별 차이는 Person + Memory를 통해 관계/대화스타일로 보정
-- Identity / Person / Alias 분리
-- sender -> self Identity 유지
-- 기존 legacy 대화/말투 유지
-- 장기기억은 신규 DB(Memory)로 통합
-- 공용 뇌 구조
-- 사람별 사실 / 취향 / 관계 / 대화스타일 / 습관 등을 분리해서 기억
-- 본인이 직접 말한 자기 정보는 높은 신뢰도로 확정
-- 제3자가 말한 정보는 기본적으로 미확인으로 취급
-- 농담 / 과장 / 순간적인 감정 / 단순 욕 / 일시적인 가치판단은 장기기억에서 제외
-- 실제 Conversation 기록으로 "누구와 실제로 대화했는가" 추적
-- 현재 room_members가 전달되면 현재 방 참가자와 과거 대화 상대를 구분
-- 방별로 기억을 분리하지 않음
-- 백그라운드에서 장기기억 및 본인 말투 학습
+- sender display_name과 실제 Person identity를 분리
+- self는 하나의 Person
+- 카카오톡 프로필명 여러 개 -> 같은 Person(self)
+- /이름은 "현재 sender 본인의 이름/정체성 연결"
+- /인물은 제3자 인물 등록
+- 상대별 차이는 Person + Memory + Relationship으로 보정
+- 자기정보 직접 진술은 높은 신뢰도로 확정
+- 제3자 발언은 후보
+- 농담/과장/순간 감정/단순 욕/단순 평가 제외
+- 실제 Conversation으로 대화 상대 추적
+- Conversation의 speaker_id=self면 sender_name이 무엇이든 본인 발화
 """
 
 import os
@@ -35,10 +31,7 @@ from google.genai import types
 
 import legacy_store as legacy
 
-from database import (
-    SessionLocal,
-    init_db,
-)
+from database import SessionLocal, init_db
 
 from models import (
     Persona,
@@ -85,6 +78,10 @@ except Exception as e:
     )
 
 
+# ============================================================================
+# Gemini
+# ============================================================================
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
@@ -92,15 +89,9 @@ if not GEMINI_API_KEY:
         "GEMINI_API_KEY 환경변수를 설정해주세요."
     )
 
-
 client = genai.Client(
     api_key=GEMINI_API_KEY
 )
-
-
-# ============================================================================
-# Gemini 모델
-# ============================================================================
 
 MODEL_NAME = os.environ.get(
     "GEMINI_MODEL",
@@ -108,13 +99,15 @@ MODEL_NAME = os.environ.get(
 )
 
 
+# ============================================================================
+# 기본 설정
+# ============================================================================
+
 KST = timezone(
     timedelta(hours=9)
 )
 
-
 app = FastAPI()
-
 
 _PERSONA_ID_CACHE = {
     "id": None
@@ -127,6 +120,7 @@ _PERSONA_ID_CACHE = {
 
 def get_persona_id():
     if _PERSONA_ID_CACHE["id"] is None:
+
         db = SessionLocal()
 
         try:
@@ -150,7 +144,7 @@ def get_persona_id():
 
 
 # ============================================================================
-# Person / Identity / Alias
+# Person
 # ============================================================================
 
 def get_person_by_key(db, person_key):
@@ -162,7 +156,7 @@ def get_person_by_key(db, person_key):
 
 
 def get_person_by_alias(db, alias):
-    alias = str(alias).strip()
+    alias = str(alias or "").strip()
 
     if not alias:
         return None
@@ -180,7 +174,9 @@ def get_person_by_alias(db, alias):
 
 
 def get_person_by_identity(db, display_name):
-    display_name = str(display_name).strip()
+    display_name = str(
+        display_name or ""
+    ).strip()
 
     if not display_name:
         return None
@@ -201,6 +197,7 @@ def get_person_by_identity(db, display_name):
 
 
 def make_person_key(db):
+
     rows = (
         db.query(Person)
         .filter(
@@ -228,11 +225,79 @@ def make_person_key(db):
 
 
 # ============================================================================
+# Self
+# ============================================================================
+
+def get_self_person(db):
+    """
+    self Person은 시스템 전체에서 딱 하나만 존재한다.
+    """
+
+    person = (
+        db.query(Person)
+        .filter_by(person_key="self")
+        .first()
+    )
+
+    return person
+
+
+def ensure_self_person(db, canonical_name=None):
+
+    person = get_self_person(db)
+
+    if not person:
+
+        person = Person(
+            person_key="self",
+            canonical_name=(
+                canonical_name
+                or "이태양"
+            ),
+            person_type="self",
+            status="active",
+            observed_in_chat=1,
+            confirmed=1,
+        )
+
+        db.add(person)
+        db.commit()
+        db.refresh(person)
+
+    else:
+
+        person.person_type = "self"
+        person.status = "active"
+        person.confirmed = 1
+
+        if canonical_name:
+            person.canonical_name = canonical_name
+
+        db.commit()
+
+    return person
+
+
+# ============================================================================
 # 현재 sender -> Person
 # ============================================================================
 
-def get_or_create_observed_person(db, display_name):
-    display_name = str(display_name).strip()
+def get_or_create_observed_person(
+    db,
+    display_name
+):
+    """
+    일반적인 sender resolution.
+
+    중요:
+    여기서는 무조건 self로 만들지 않는다.
+
+    실제 self 연결은 /이름 명령을 통해 한다.
+    """
+
+    display_name = str(
+        display_name or ""
+    ).strip()
 
     if not display_name:
         raise ValueError(
@@ -240,7 +305,7 @@ def get_or_create_observed_person(db, display_name):
         )
 
     # ------------------------------------------------------------------------
-    # 1. Identity
+    # 1. 카카오톡 Identity
     # ------------------------------------------------------------------------
 
     identity = (
@@ -256,7 +321,10 @@ def get_or_create_observed_person(db, display_name):
 
         person = identity.person
 
-        if person.status == "inactive":
+        if person.status in [
+            "inactive",
+            "merged"
+        ]:
             person.status = "active"
 
         person.observed_in_chat = 1
@@ -276,7 +344,10 @@ def get_or_create_observed_person(db, display_name):
 
     if person:
 
-        if person.status == "inactive":
+        if person.status in [
+            "inactive",
+            "merged"
+        ]:
             person.status = "active"
 
         person.observed_in_chat = 1
@@ -287,7 +358,11 @@ def get_or_create_observed_person(db, display_name):
                 target_key=person.person_key,
                 platform="kakaotalk",
                 display_name=display_name,
-                is_primary=1,
+                is_primary=(
+                    1
+                    if person.person_key == "self"
+                    else 0
+                ),
             )
         )
 
@@ -296,13 +371,11 @@ def get_or_create_observed_person(db, display_name):
         return person, False
 
     # ------------------------------------------------------------------------
-    # 3. 처음 보는 사람
+    # 3. 처음 보는 sender
     # ------------------------------------------------------------------------
 
-    person_key = make_person_key(db)
-
     person = Person(
-        person_key=person_key,
+        person_key=make_person_key(db),
         canonical_name=display_name,
         person_type="person",
         status="active",
@@ -319,7 +392,7 @@ def get_or_create_observed_person(db, display_name):
             person_id=person.id,
             alias=display_name,
             source=Source.OBSERVED,
-            confidence=0.5
+            confidence=0.5,
         )
     )
 
@@ -329,7 +402,7 @@ def get_or_create_observed_person(db, display_name):
             target_key=person.person_key,
             platform="kakaotalk",
             display_name=display_name,
-            is_primary=1
+            is_primary=1,
         )
     )
 
@@ -339,12 +412,38 @@ def get_or_create_observed_person(db, display_name):
 
 
 # ============================================================================
-# 이름 명령
+# /이름
 # ============================================================================
 
-def command_name(db, sender, new_name):
-    sender = str(sender).strip()
-    new_name = str(new_name).strip()
+def command_name(
+    db,
+    sender,
+    new_name
+):
+    """
+    /이름은 현재 sender 본인의 정체성을 연결한다.
+
+    예:
+
+    성시연:
+        /이름 이태양
+
+    => 성시연 Identity -> self
+    => 성시연 Alias -> self
+    => 이태양 Alias -> self
+
+    다른 사람:
+
+    만세:
+        /이름 만세
+
+    => 만세 sender -> 만세 Person
+
+    즉 /이름은 모두가 사용할 수 있다.
+    """
+
+    sender = str(sender or "").strip()
+    new_name = str(new_name or "").strip()
 
     if not sender:
         return "sender가 없어"
@@ -353,38 +452,7 @@ def command_name(db, sender, new_name):
         return "이름을 적어줘"
 
     # ------------------------------------------------------------------------
-    # self Person 확보
-    # ------------------------------------------------------------------------
-
-    self_person = (
-        db.query(Person)
-        .filter_by(person_key="self")
-        .first()
-    )
-
-    if not self_person:
-
-        self_person = Person(
-            person_key="self",
-            canonical_name=new_name,
-            person_type="self",
-            status="active",
-            observed_in_chat=1,
-            confirmed=1
-        )
-
-        db.add(self_person)
-        db.commit()
-        db.refresh(self_person)
-
-    self_person.canonical_name = new_name
-    self_person.person_type = "self"
-    self_person.status = "active"
-    self_person.confirmed = 1
-    self_person.observed_in_chat = 1
-
-    # ------------------------------------------------------------------------
-    # 현재 sender Identity 확인
+    # 현재 sender Identity
     # ------------------------------------------------------------------------
 
     current_identity = (
@@ -403,30 +471,225 @@ def command_name(db, sender, new_name):
     )
 
     # ------------------------------------------------------------------------
-    # sender alias 제거
+    # 기존 self 확인
     # ------------------------------------------------------------------------
 
-    sender_aliases = (
-        db.query(PersonAlias)
-        .filter_by(alias=sender)
-        .all()
+    self_person = get_self_person(db)
+
+    # ------------------------------------------------------------------------
+    # 이미 self의 이름/별칭이면 self로 연결
+    # ------------------------------------------------------------------------
+
+    is_self_name = False
+
+    if self_person:
+
+        if (
+            self_person.canonical_name
+            and self_person.canonical_name
+            == new_name
+        ):
+            is_self_name = True
+
+        self_alias = (
+            db.query(PersonAlias)
+            .filter(
+                PersonAlias.person_id
+                == self_person.id,
+                PersonAlias.alias
+                == new_name
+            )
+            .first()
+        )
+
+        if self_alias:
+            is_self_name = True
+
+    # ------------------------------------------------------------------------
+    # 처음 /이름을 사용하면서 "이태양"을 지정하면 self
+    #
+    # 기존 코드의 Persona 이름이 "태양"이므로
+    # 이태양 / 태양 둘 다 self 이름으로 인정한다.
+    # ------------------------------------------------------------------------
+
+    self_names = {
+        "이태양",
+        "태양",
+    }
+
+    env_self_names = os.environ.get(
+        "SELF_NAMES",
+        ""
     )
 
-    for alias in sender_aliases:
+    if env_self_names:
 
-        if alias.person_id != self_person.id:
-            db.delete(alias)
+        for name in env_self_names.split(","):
 
-    db.flush()
+            name = name.strip()
+
+            if name:
+                self_names.add(name)
+
+    if new_name in self_names:
+        is_self_name = True
+
+    # =========================================================================
+    # SELF
+    # =========================================================================
+
+    if is_self_name:
+
+        self_person = ensure_self_person(
+            db,
+            canonical_name=new_name
+        )
+
+        # --------------------------------------------------------------------
+        # sender Identity -> self
+        # --------------------------------------------------------------------
+
+        if current_identity:
+
+            current_identity.person_id = (
+                self_person.id
+            )
+
+            current_identity.target_key = "self"
+            current_identity.platform = "kakaotalk"
+            current_identity.is_primary = 1
+
+        else:
+
+            db.add(
+                Identity(
+                    person_id=self_person.id,
+                    target_key="self",
+                    platform="kakaotalk",
+                    display_name=sender,
+                    is_primary=1,
+                )
+            )
+
+        # --------------------------------------------------------------------
+        # sender alias -> self
+        # --------------------------------------------------------------------
+
+        sender_alias = (
+            db.query(PersonAlias)
+            .filter_by(
+                person_id=self_person.id,
+                alias=sender,
+            )
+            .first()
+        )
+
+        if not sender_alias:
+
+            db.add(
+                PersonAlias(
+                    person_id=self_person.id,
+                    alias=sender,
+                    source=Source.DIRECT_STATEMENT,
+                    confidence=1.0,
+                )
+            )
+
+        # --------------------------------------------------------------------
+        # canonical name -> self
+        # --------------------------------------------------------------------
+
+        name_alias = (
+            db.query(PersonAlias)
+            .filter_by(
+                person_id=self_person.id,
+                alias=new_name,
+            )
+            .first()
+        )
+
+        if not name_alias:
+
+            db.add(
+                PersonAlias(
+                    person_id=self_person.id,
+                    alias=new_name,
+                    source=Source.DIRECT_STATEMENT,
+                    confidence=1.0,
+                )
+            )
+
+        # --------------------------------------------------------------------
+        # 기존 관측 Person이 자기 자신이었다면 비활성화
+        # --------------------------------------------------------------------
+
+        if (
+            old_person
+            and old_person.id != self_person.id
+            and old_person.person_key != "self"
+            and not old_person.confirmed
+        ):
+
+            old_person.status = "inactive"
+
+        db.commit()
+
+        return (
+            f"{sender} -> {new_name} "
+            f"(self) 연결햇어"
+        )
+
+    # =========================================================================
+    # OTHER PERSON
+    # =========================================================================
+
+    # 이미 등록된 다른 Person이 이름이면 그 사람으로 연결
+    target_person = get_person_by_alias(
+        db,
+        new_name
+    )
+
+    if not target_person:
+
+        target_person = (
+            get_person_by_identity(
+                db,
+                new_name
+            )
+        )
+
+    # 없으면 새로운 사람
+    if not target_person:
+
+        target_person = Person(
+            person_key=make_person_key(db),
+            canonical_name=new_name,
+            person_type="person",
+            status="active",
+            observed_in_chat=1,
+            confirmed=1,
+        )
+
+        db.add(target_person)
+        db.commit()
+        db.refresh(target_person)
+
+    else:
+
+        target_person.status = "active"
+        target_person.confirmed = 1
+        target_person.observed_in_chat = 1
 
     # ------------------------------------------------------------------------
-    # Identity -> self
+    # 기존 sender Identity -> target
     # ------------------------------------------------------------------------
 
     if current_identity:
 
-        current_identity.person_id = self_person.id
-        current_identity.target_key = "self"
+        current_identity.person_id = target_person.id
+        current_identity.target_key = (
+            target_person.person_key
+        )
         current_identity.platform = "kakaotalk"
         current_identity.is_primary = 1
 
@@ -434,11 +697,11 @@ def command_name(db, sender, new_name):
 
         db.add(
             Identity(
-                person_id=self_person.id,
-                target_key="self",
+                person_id=target_person.id,
+                target_key=target_person.person_key,
                 platform="kakaotalk",
                 display_name=sender,
-                is_primary=1
+                is_primary=1,
             )
         )
 
@@ -449,8 +712,8 @@ def command_name(db, sender, new_name):
     sender_alias = (
         db.query(PersonAlias)
         .filter_by(
-            person_id=self_person.id,
-            alias=sender
+            person_id=target_person.id,
+            alias=sender,
         )
         .first()
     )
@@ -459,22 +722,22 @@ def command_name(db, sender, new_name):
 
         db.add(
             PersonAlias(
-                person_id=self_person.id,
+                person_id=target_person.id,
                 alias=sender,
                 source=Source.DIRECT_STATEMENT,
-                confidence=1.0
+                confidence=1.0,
             )
         )
 
     # ------------------------------------------------------------------------
-    # canonical name alias
+    # new_name alias
     # ------------------------------------------------------------------------
 
     name_alias = (
         db.query(PersonAlias)
         .filter_by(
-            person_id=self_person.id,
-            alias=new_name
+            person_id=target_person.id,
+            alias=new_name,
         )
         .first()
     )
@@ -483,53 +746,37 @@ def command_name(db, sender, new_name):
 
         db.add(
             PersonAlias(
-                person_id=self_person.id,
+                person_id=target_person.id,
                 alias=new_name,
                 source=Source.DIRECT_STATEMENT,
-                confidence=1.0
+                confidence=1.0,
             )
         )
 
-    # ------------------------------------------------------------------------
-    # 기존 관측 Person 비활성화
-    # ------------------------------------------------------------------------
-
-    if (
-        old_person
-        and old_person.id != self_person.id
-        and old_person.person_key != "self"
-        and not old_person.confirmed
-    ):
-
-        other_alias_count = (
-            db.query(PersonAlias)
-            .filter(
-                PersonAlias.person_id == old_person.id,
-                PersonAlias.alias != sender
-            )
-            .count()
-        )
-
-        if other_alias_count == 0:
-            old_person.status = "inactive"
+    # canonical name
+    target_person.canonical_name = new_name
 
     db.commit()
 
     return (
         f"{sender} -> {new_name} "
-        f"(self) 연결햇어"
+        f"({target_person.person_key}) 연결햇어"
     )
 
 
 # ============================================================================
-# 이름 / 인물 조회
+# 이름 목록
 # ============================================================================
 
 def command_name_list(db):
 
     persons = (
         db.query(Person)
-        .filter_by(status="active")
+        .filter(
+            Person.status.in_(
+                ["active", "merged"]
+            )
+        )
         .order_by(Person.id.asc())
         .all()
     )
@@ -545,14 +792,38 @@ def command_name_list(db):
 
         aliases = (
             db.query(PersonAlias)
-            .filter_by(person_id=person.id)
+            .filter_by(
+                person_id=person.id
+            )
             .order_by(PersonAlias.id.asc())
+            .all()
+        )
+
+        identities = (
+            db.query(Identity)
+            .filter_by(
+                person_id=person.id,
+                platform="kakaotalk"
+            )
             .all()
         )
 
         alias_text = ", ".join(
             alias.alias
             for alias in aliases
+            if alias.alias
+        )
+
+        identity_text = ", ".join(
+            identity.display_name
+            for identity in identities
+            if identity.display_name
+        )
+
+        role = (
+            "본인"
+            if person.person_key == "self"
+            else "타인"
         )
 
         observed = (
@@ -564,15 +835,22 @@ def command_name_list(db):
         lines.append(
             f"{person.person_key} | "
             f"{person.canonical_name} | "
+            f"{role} | "
             f"{observed} | "
-            f"별칭: {alias_text or '-'}"
+            f"별칭: {alias_text or '-'} | "
+            f"카톡ID: {identity_text or '-'}"
         )
 
     return "\n".join(lines)
 
 
+# ============================================================================
+# 이름 삭제
+# ============================================================================
+
 def command_name_delete(db, name):
-    name = str(name).strip()
+
+    name = str(name or "").strip()
 
     if not name:
         return "삭제할 이름을 적어줘"
@@ -601,7 +879,9 @@ def command_name_delete(db, name):
         deleted = True
 
     if not deleted:
-        return f"{name}이라는 이름은 없어"
+        return (
+            f"{name}이라는 이름 연결은 없어"
+        )
 
     db.commit()
 
@@ -615,10 +895,14 @@ def command_name_delete(db, name):
 # 인물 등록
 # ============================================================================
 
-def command_person(db, canonical_name, aliases):
+def command_person(
+    db,
+    canonical_name,
+    aliases
+):
 
     canonical_name = str(
-        canonical_name
+        canonical_name or ""
     ).strip()
 
     if not canonical_name:
@@ -654,7 +938,7 @@ def command_person(db, canonical_name, aliases):
                 person_type="person",
                 status="active",
                 observed_in_chat=0,
-                confirmed=1
+                confirmed=1,
             )
 
             db.add(person)
@@ -663,7 +947,7 @@ def command_person(db, canonical_name, aliases):
 
     for name in [canonical_name] + aliases:
 
-        name = str(name).strip()
+        name = str(name or "").strip()
 
         if not name:
             continue
@@ -676,7 +960,10 @@ def command_person(db, canonical_name, aliases):
 
         if existing_alias:
 
-            if existing_alias.person_id != person.id:
+            if (
+                existing_alias.person_id
+                != person.id
+            ):
 
                 return (
                     f"{name}은 이미 "
@@ -691,7 +978,7 @@ def command_person(db, canonical_name, aliases):
                 person_id=person.id,
                 alias=name,
                 source=Source.DIRECT_STATEMENT,
-                confidence=1.0
+                confidence=1.0,
             )
         )
 
@@ -706,9 +993,16 @@ def command_person(db, canonical_name, aliases):
     )
 
 
-def command_person_delete(db, name):
+# ============================================================================
+# 인물 삭제
+# ============================================================================
 
-    name = str(name).strip()
+def command_person_delete(
+    db,
+    name
+):
+
+    name = str(name or "").strip()
 
     person = get_person_by_alias(
         db,
@@ -716,12 +1010,14 @@ def command_person_delete(db, name):
     )
 
     if not person:
-        return f"{name}이라는 인물을 못 찾겠어"
+        return (
+            f"{name}이라는 인물을 못 찾겠어"
+        )
 
     if person.person_key == "self":
 
         return (
-            "본인은 인물삭제 말고 "
+            "본인은 /인물삭제 말고 "
             "/이름삭제를 써"
         )
 
@@ -743,6 +1039,10 @@ def command_person_delete(db, name):
         f"({person.person_key})"
     )
 
+
+# ============================================================================
+# 인물 병합
+# ============================================================================
 
 def command_person_merge(
     db,
@@ -769,13 +1069,18 @@ def command_person_merge(
     if old_person.id == target_person.id:
         return "이미 같은 사람이야"
 
+    if old_person.person_key == "self":
+        return "self는 다른 사람으로 병합할 수 없어"
+
     # ------------------------------------------------------------------------
-    # Alias 병합
+    # Alias
     # ------------------------------------------------------------------------
 
     for alias in (
         db.query(PersonAlias)
-        .filter_by(person_id=old_person.id)
+        .filter_by(
+            person_id=old_person.id
+        )
         .all()
     ):
 
@@ -783,29 +1088,33 @@ def command_person_merge(
             db.query(PersonAlias)
             .filter(
                 PersonAlias.alias == alias.alias,
-                PersonAlias.person_id == target_person.id
+                PersonAlias.person_id
+                == target_person.id,
             )
             .first()
         )
 
         if duplicate:
             db.delete(alias)
-
         else:
             alias.person_id = target_person.id
 
     # ------------------------------------------------------------------------
-    # Identity 병합
+    # Identity
     # ------------------------------------------------------------------------
 
     for identity in (
         db.query(Identity)
-        .filter_by(person_id=old_person.id)
+        .filter_by(
+            person_id=old_person.id
+        )
         .all()
     ):
 
         identity.person_id = target_person.id
-        identity.target_key = target_person.person_key
+        identity.target_key = (
+            target_person.person_key
+        )
 
     old_person.status = "merged"
     old_person.notes = (
@@ -832,20 +1141,6 @@ def log_conversation(
     message,
     room_id="dm"
 ):
-    """
-    실제 Conversation 기록.
-
-    speaker_id에는 Person key를 넣는다.
-
-    self 발화:
-        speaker_id = self
-
-    타인 발화:
-        speaker_id = person_XXX / cha 등
-
-    방별 기억 분리는 하지 않는다.
-    room_id는 현재 요청의 출처 추적용으로만 남긴다.
-    """
 
     db = SessionLocal()
 
@@ -873,6 +1168,7 @@ def log_conversation(
         )
 
     finally:
+
         db.close()
 
 
@@ -886,13 +1182,13 @@ COMMAND_PREFIXES = (
     "/기억",
     "/말투",
     "/리셋",
-    "/초기화"
+    "/초기화",
 )
 
 
 def is_command(text):
 
-    text = str(text).strip()
+    text = str(text or "").strip()
 
     return bool(
         text
@@ -901,6 +1197,10 @@ def is_command(text):
         )
     )
 
+
+# ============================================================================
+# 본인 말투 학습
+# ============================================================================
 
 def should_learn_style(text):
 
@@ -946,7 +1246,7 @@ def should_learn_style(text):
 
 
 # ============================================================================
-# 기본 Persona
+# Persona
 # ============================================================================
 
 STYLE_RULES = """
@@ -980,6 +1280,37 @@ STYLE_RULES = """
 SYSTEM_INSTRUCTION = f"""
 너는 21살 대학생 이태양의 AI 클론 '짭태양'이다.
 
+중요:
+너에게 전달되는 카카오톡 sender 이름은
+반드시 실제 인물의 본명과 같은 것이 아니다.
+
+예:
+- 카카오톡 프로필명: 성시연
+- 실제 Person: self
+- 실제 이름: 이태양
+
+이 경우 성시연은 타인이 아니다.
+성시연은 이태양 본인이 사용하는 카카오톡 식별명이다.
+
+[Identity 최우선 규칙]
+
+현재 발화자의 Person key가 "self"라면
+그 발화자는 무조건 이태양 본인이다.
+
+현재 sender가 "성시연"이어도
+Person key가 self라면
+성시연을 타인으로 해석하지 않는다.
+
+과거 Conversation에서도
+speaker_id == self이면
+speaker_name이 성시연이든 다른 이름이든
+모두 이태양 본인의 발화다.
+
+반대로 Person key가 person_XXX라면
+그 사람은 이태양이 아닌 타인이다.
+
+즉 이름 문자열보다 Person key / Identity 관계를 우선한다.
+
 너의 기본 성격과 기본 말투는 하나다.
 사람마다 완전히 다른 페르소나가 되는 것이 아니다.
 
@@ -996,32 +1327,57 @@ SYSTEM_INSTRUCTION = f"""
 없는 관계를 상상해서 만들어내지 않는다.
 
 [기억 사용 원칙]
+
 1. 장기기억에 있는 사실은 자연스럽게 활용한다.
 2. 사람의 취향/습관/관계/대화스타일을 구분한다.
 3. 미확인 정보는 확정 사실처럼 말하지 않는다.
-4. 단순히 누군가를 욕하거나 평가한 기록을 그 사람의 고정된 성격으로 단정하지 않는다.
-5. 누군가가 농담으로 한 말을 진짜 신념으로 취급하지 않는다.
+4. 단순히 누군가를 욕하거나 평가한 기록을
+   그 사람의 고정된 성격으로 단정하지 않는다.
+5. 농담으로 한 말을 진짜 신념으로 취급하지 않는다.
 6. 실제 Conversation 기록에 대화가 있으면 실제 대화 사실로 취급한다.
 7. 현재 방 참가자와 과거에 대화했던 사람은 구분한다.
-8. 현재 방 참가자 정보가 없으면 과거 기록만으로 현재 방에 있다고 단정하지 않는다.
+8. 현재 방 참가자 정보가 없으면 과거 기록만으로
+   현재 방에 있다고 단정하지 않는다.
 9. 모르는 내용은 아는 척하지 않는다.
 
-[대화 상대에 대한 태도]
-현재 상대의 Person 정보와 관계 기억이 제공되면 그것을 사용한다.
-관계 기억은 기본 Persona 위에 얹는 보정값이다.
+[사람별 관계 보정]
+
+Person마다 다음과 같은 차이를 기억할 수 있다.
+
+- 진지하게 대화하는 사람
+- 장난을 많이 치는 사람
+- 욕하면서 편하게 대화하는 사람
+- 게임 얘기를 많이 하는 사람
+- 상담이나 고민을 이야기하는 사람
+- 특정 주제로 자주 이야기하는 사람
+
+하지만 이것은 별도의 성격을 창조하는 것이 아니다.
+
+기본 짭태양 성격은 유지하면서
+실제 관계에 따라 표현 방식만 조금 보정한다.
+
+예:
+"이씨한테는 진정성 있게 말하는 편"
+"변씨한테는 욕쟁이처럼 편하게 말하는 편"
+
+이런 기억이 있다면
+이씨에게는 조금 더 진지하게,
+변씨에게는 조금 더 거칠고 장난스럽게 말할 수 있다.
+
+하지만 없는 관계를 상상해서 만들면 안 된다.
 
 {STYLE_RULES}
 """
 
 
 # ============================================================================
-# 기억 카테고리
+# Memory category
 # ============================================================================
 
 def normalize_memory_category(category):
 
     category = str(
-        category
+        category or ""
     ).strip().lower()
 
     mapping = {
@@ -1059,7 +1415,7 @@ def normalize_memory_category(category):
 
 
 # ============================================================================
-# 기억 판정
+# Memory judgement
 # ============================================================================
 
 def parse_memory_judgement(text):
@@ -1073,42 +1429,35 @@ def parse_memory_judgement(text):
         r"^```(?:json)?\s*",
         "",
         cleaned,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
 
     cleaned = re.sub(
         r"\s*```$",
         "",
-        cleaned
-    )
-
-    cleaned = cleaned.strip()
+        cleaned,
+    ).strip()
 
     try:
 
-        data = json.loads(
-            cleaned
-        )
+        data = json.loads(cleaned)
 
     except Exception:
 
         match = re.search(
             r"\{.*\}",
             cleaned,
-            flags=re.DOTALL
+            flags=re.DOTALL,
         )
 
         if not match:
             return None
 
         try:
-
             data = json.loads(
                 match.group(0)
             )
-
         except Exception:
-
             return None
 
     if not isinstance(data, dict):
@@ -1116,7 +1465,7 @@ def parse_memory_judgement(text):
 
     save_value = data.get(
         "save",
-        False
+        False,
     )
 
     if isinstance(save_value, str):
@@ -1129,7 +1478,7 @@ def parse_memory_judgement(text):
                 "y",
                 "1",
                 "저장",
-                "예"
+                "예",
             ]
         )
 
@@ -1151,18 +1500,18 @@ def parse_memory_judgement(text):
     memory = str(
         data.get(
             "memory",
-            ""
+            "",
         )
     ).strip()[:300].rstrip()
 
     people_involved = data.get(
         "people_involved",
-        []
+        [],
     )
 
     if not isinstance(
         people_involved,
-        list
+        list,
     ):
         people_involved = []
 
@@ -1171,11 +1520,13 @@ def parse_memory_judgement(text):
     for person in people_involved:
 
         person = str(
-            person
+            person or ""
         ).strip()
 
-        if person and person not in cleaned_people:
-
+        if (
+            person
+            and person not in cleaned_people
+        ):
             cleaned_people.append(
                 person
             )
@@ -1189,9 +1540,13 @@ def parse_memory_judgement(text):
         "save": True,
         "category": category,
         "memory": memory,
-        "people_involved": cleaned_people
+        "people_involved": cleaned_people,
     }
 
+
+# ============================================================================
+# Long-term memory judge
+# ============================================================================
 
 def judge_long_term_memory(
     speaker_name,
@@ -1199,17 +1554,8 @@ def judge_long_term_memory(
     user_input,
     recent_history=None,
     existing_memories=None,
-    known_people=None
+    known_people=None,
 ):
-    """
-    장기기억 선별.
-
-    핵심:
-    - 자기 취향/습관/사실을 본인이 직접 말하면 확정 가능한 기억
-    - 타인의 자기정보를 그 사람이 직접 말하면 역시 확정 가능한 기억
-    - 제3자가 전해준 정보는 후보/미확인
-    - 농담/과장/순간 감정/욕/평가는 저장하지 않음
-    """
 
     if (
         not user_input
@@ -1244,107 +1590,112 @@ def judge_long_term_memory(
     prompt = f"""
 너는 장기기억 선별기다.
 
-현재 발화를 보고 앞으로도 이 사람을 이해하는 데 도움이 되는
+현재 발화를 보고 앞으로도 사람을 이해하는 데 도움이 되는
 안정적인 정보만 장기기억으로 저장한다.
 
-중요한 것은 "누가 말했는가"와 "무슨 종류의 정보인가"를 구분하는 것이다.
+가장 중요한 것은
+"누가 말했는가"
+"그 사람이 자기 자신에 대해 말했는가"
+"다른 사람에 대해 말했는가"
+를 구분하는 것이다.
 
 현재 발화자:
 - 이름: {speaker_name}
 - Person key: {speaker_key}
 
-[핵심 원칙]
+[Identity 규칙]
 
-1. 사람이 자기 자신의 취향/습관/사실을 직접 말한 경우
-   그것은 해당 사람에 대한 직접 진술이다.
+Person key가 self이면 현재 발화자는 이태양 본인이다.
+
+sender 이름이 성시연이어도
+speaker_key가 self이면 이태양 본인이다.
+
+[저장 규칙]
+
+1. 사람이 자기 자신의 취향/습관/사실을 직접 말한 경우 저장 가능.
 
 예:
 만세: "나 떡볶이 좋아해"
--> 저장
--> 대상: 만세
--> category: 취향
--> memory: "떡볶이를 좋아함"
 
-2. 사람이 자기 관계나 대화방식을 직접 설명한 경우도 저장할 수 있다.
+=> 저장
+=> 대상: 만세
+=> category: 취향
+=> memory: "떡볶이를 좋아함"
 
-예:
-만세: "나 이씨랑은 서로 욕하면서 놈"
--> 저장
--> category: 관계
--> people_involved: ["만세", "이씨"]
-
-3. 다른 사람이 만세에 대해 말하는 경우는 다르다.
+2. self가 자기 정보를 직접 말한 경우도 저장 가능.
 
 예:
-이씨: "만세 떡볶이 좋아하던데"
--> 저장할 수는 있지만 확정 사실이 아니라 미확인 정보
--> 단, 기억 내용 자체는 유용하면 저장 가능
+성시연(self):
+"나 떡볶이 좋아해"
 
-4. 단순한 순간 발언은 저장하지 않는다.
+=> 대상: self
+=> 확정
+
+3. 자기 관계나 대화방식을 직접 설명한 경우 저장 가능.
+
+예:
+만세:
+"나 이씨랑은 서로 욕하면서 놈"
+
+=> category: 관계 또는 대화스타일
+
+4. 제3자가 다른 사람의 정보를 말하는 경우
+확정하지 않는다.
+
+예:
+이씨:
+"만세 떡볶이 좋아하던데"
+
+=> 유용하다면 저장 가능
+=> 하지만 status는 candidate
+
+5. 단순한 순간 발언은 저장하지 않는다.
 
 예:
 "만세 오늘 개웃김"
 "만세 오늘 짜증남"
 "이태양 바보같아 ㅋㅋ"
 "나 지금 개빡침"
-"너 때문에 죽겠다 ㅋㅋ"
 
-이런 것은 장기적인 사람 정보가 아니다.
-
-5. 농담/과장/비유/밈은 저장하지 않는다.
+6. 농담/과장/비유/밈은 저장하지 않는다.
 
 예:
 "나 떡볶이 백만개 먹을 수 있음"
-"태양 때문에 암 걸리겠다 ㅋㅋ"
 "나 게임 평생 안 접음"
--> 저장하지 않는다.
 
-6. 단순한 욕설이나 순간적인 가치판단은 저장하지 않는다.
+7. 단순 욕이나 순간적인 가치판단은 저장하지 않는다.
 
 예:
 "이태양 바보같음"
 "변씨 개싸가지"
 "만세 존나 답답함"
 
-이것만으로 그 사람의 고정된 평가관계를 저장하지 않는다.
+이것만으로 고정적인 관계나 성격을 만들지 않는다.
 
-7. 단, 반복적으로 나타나는 실제 관계 패턴은 저장할 수 있다.
-
-예:
-- 서로 지속적으로 욕하면서 장난함
-- 특정 사람에게는 진지한 상담을 자주 함
-- 특정 사람과 게임을 자주 함
-- 특정 사람과는 항상 가볍게 농담함
-
-이런 반복적인 패턴은 '관계' 또는 '대화스타일'로 저장할 가치가 있다.
-
-8. 사람의 성격 자체를 함부로 만들어내지 않는다.
-
-"변씨는 원래 나쁜 사람"
-같은 식의 단정은 저장하지 않는다.
-
-9. 사람마다 다르게 대하는 방식은 매우 중요하다.
-
-하지만 한 번의 발화가 아니라
-반복적이고 안정적인 패턴일 때 저장한다.
+8. 반복적이고 안정적인 관계 패턴은 저장할 수 있다.
 
 예:
-"이씨한테는 진지하게 말하는 편"
--> 대화스타일
+"이씨랑은 항상 진지하게 얘기함"
+"변씨랑은 서로 욕하면서 장난침"
+"만세랑은 게임 얘기를 자주 함"
 
-"변씨랑은 욕하면서 장난치는 편"
--> 대화스타일 또는 관계
+9. 한 번의 발화만으로
+"누구는 나와 친하다"
+"누구는 나를 싫어한다"
+같은 관계를 확정하지 않는다.
 
-10. people_involved에는 이 기억의 대상이 되는 실제 인물의
-Person key 또는 등록된 이름을 넣는다.
+10. 사람의 성격 자체를 함부로 만들어내지 않는다.
 
-현재 발화자가 자기 자신에 대해 말한 경우:
-["{speaker_key}"]
+11. people_involved는 실제 Person key를 우선한다.
 
-현재 발화자가 다른 사람과의 관계를 말한 경우:
-["{speaker_key}", "상대방"]
+현재 발화자가 self라면 자기 정보의 대상은
+["self"]
 
-가능하면 아래 등록 인물 목록의 Person key를 사용한다.
+현재 발화자가 person_001이라면
+["person_001"]
+
+두 사람의 관계라면:
+["person_001", "person_002"]
 
 [등록 인물]
 {people_text or "(없음)"}
@@ -1371,7 +1722,7 @@ Person key 또는 등록된 이름을 넣는다.
 저장하지 않음:
 {{ "save": false }}
 
-category는 다음 중 하나만 사용한다:
+category:
 - 취향
 - 사람
 - 관계
@@ -1392,7 +1743,7 @@ category는 다음 중 하나만 사용한다:
                         types.Part.from_text(
                             text=prompt
                         )
-                    ]
+                    ],
                 )
             ],
             config=types.GenerateContentConfig(
@@ -1422,20 +1773,14 @@ category는 다음 중 하나만 사용한다:
 
 
 # ============================================================================
-# 기억 저장
+# Memory duplicate
 # ============================================================================
 
 def memory_similarity_exists(
     db,
     memory_text,
-    people_involved
+    people_involved,
 ):
-    """
-    너무 비슷한 기억 중복 저장 방지.
-
-    완벽한 의미 중복 판정은 하지 않고
-    동일 대상 + 문자열 포함 정도만 사용한다.
-    """
 
     existing = (
         db.query(Memory)
@@ -1447,38 +1792,34 @@ def memory_similarity_exists(
     )
 
     normalized_new = (
-        str(memory_text)
+        str(memory_text or "")
         .strip()
         .lower()
     )
 
+    new_people = set(
+        map(
+            str,
+            people_involved or []
+        )
+    )
+
     for old in existing:
 
-        old_text = str(
-            old.content or ""
-        ).strip().lower()
-
-        old_people = (
-            old.people_involved
-            or []
+        old_text = (
+            str(old.content or "")
+            .strip()
+            .lower()
         )
 
-        same_people = (
-            set(
-                map(
-                    str,
-                    people_involved or []
-                )
-            )
-            == set(
-                map(
-                    str,
-                    old_people
-                )
+        old_people = set(
+            map(
+                str,
+                old.people_involved or []
             )
         )
 
-        if not same_people:
+        if new_people != old_people:
             continue
 
         if (
@@ -1491,6 +1832,10 @@ def memory_similarity_exists(
     return False
 
 
+# ============================================================================
+# Memory save
+# ============================================================================
+
 def save_auto_memory_if_worthy(
     conversation_key,
     speaker_name,
@@ -1499,7 +1844,7 @@ def save_auto_memory_if_worthy(
     is_self,
     recent_history=None,
     existing_memories=None,
-    known_people=None
+    known_people=None,
 ):
 
     result = judge_long_term_memory(
@@ -1519,37 +1864,25 @@ def save_auto_memory_if_worthy(
 
     category = result.get(
         "category",
-        "기타"
+        "기타",
     )
 
     memory = result.get(
         "memory",
-        ""
+        "",
     )
 
     people = result.get(
         "people_involved",
-        []
+        [],
     )
-
-    # ------------------------------------------------------------------------
-    # 모델이 people_involved를 빼먹은 경우
-    #
-    # 자기 발화의 안정적인 정보라면 발화자를 자동 대상 처리
-    # ------------------------------------------------------------------------
-
-    if not people:
-
-        people = [
-            speaker_key
-        ]
 
     db = SessionLocal()
 
     try:
 
         # --------------------------------------------------------------------
-        # 사람 이름 -> Person key 정규화
+        # people -> Person key 정규화
         # --------------------------------------------------------------------
 
         normalized_people = []
@@ -1557,17 +1890,15 @@ def save_auto_memory_if_worthy(
         for person_value in people:
 
             person_value = str(
-                person_value
+                person_value or ""
             ).strip()
 
             if not person_value:
                 continue
 
-            person_obj = (
-                get_person_by_key(
-                    db,
-                    person_value
-                )
+            person_obj = get_person_by_key(
+                db,
+                person_value
             )
 
             if person_obj:
@@ -1595,39 +1926,39 @@ def save_auto_memory_if_worthy(
                 person_value
             )
 
-        people = list(
+        # --------------------------------------------------------------------
+        # 모델이 대상 인물을 안 줬으면 발화자
+        # --------------------------------------------------------------------
+
+        if not normalized_people:
+            normalized_people = [
+                speaker_key
+            ]
+
+        normalized_people = list(
             dict.fromkeys(
                 normalized_people
             )
         )
 
         # --------------------------------------------------------------------
-        # 중복 검사
+        # 중복
         # --------------------------------------------------------------------
 
         if memory_similarity_exists(
             db,
             memory,
-            people
+            normalized_people,
         ):
             return None
 
         # --------------------------------------------------------------------
-        # 직접 당사자가 자기 정보를 말했는지 판단
-        #
-        # 현재 발화자가 기억 대상에 포함되어 있고
-        # 그 사람이 직접 말한 경우 확정.
-        #
-        # 예:
-        # 만세: "나 떡볶이 좋아함"
-        # speaker = person_001
-        # people = ["person_001"]
-        #
-        # => CONFIRMED
+        # 자기 자신에 대한 직접 진술인지
         # --------------------------------------------------------------------
 
         speaker_is_subject = (
-            speaker_key in people
+            speaker_key
+            in normalized_people
         )
 
         if speaker_is_subject:
@@ -1642,19 +1973,12 @@ def save_auto_memory_if_worthy(
         # Source
         # --------------------------------------------------------------------
 
-        if is_self:
+        if speaker_is_subject:
 
             source = Source.DIRECT_STATEMENT
 
-        elif speaker_is_subject:
-
-            # 다른 사람이 자기 정보를 직접 말함.
-            # enum상 INFORMANT를 사용하되 status는 확정으로 둔다.
-            source = Source.INFORMANT
-
         else:
 
-            # 제3자가 다른 사람에 대해 말함.
             source = Source.INFORMANT
 
         new_memory = Memory(
@@ -1662,30 +1986,31 @@ def save_auto_memory_if_worthy(
             memory_type=MemoryType.FACT,
             content=memory,
             context=category,
-            people_involved=people,
+            people_involved=normalized_people,
             source=source,
-            status=status
+            status=status,
         )
 
         db.add(new_memory)
         db.commit()
 
         print(
-            "[memory] 공용 뇌 자동 저장: "
+            "[memory] 저장: "
             f"{category} - {memory} "
-            f"(관련인물: {people}, "
-            f"상태: {'확정' if status == ItemStatus.CONFIRMED else '미확인'})"
+            f"(대상={normalized_people}, "
+            f"상태="
+            f"{'확정' if status == ItemStatus.CONFIRMED else '후보'})"
         )
 
         return {
             "category": category,
             "memory": memory,
-            "people_involved": people,
+            "people_involved": normalized_people,
             "status": (
                 "confirmed"
                 if status == ItemStatus.CONFIRMED
                 else "candidate"
-            )
+            ),
         }
 
     except Exception as e:
@@ -1703,7 +2028,7 @@ def save_auto_memory_if_worthy(
 
 
 # ============================================================================
-# 백그라운드 학습
+# Background learning
 # ============================================================================
 
 def background_learning(
@@ -1714,11 +2039,11 @@ def background_learning(
     recent_history,
     existing_memories,
     is_self,
-    known_people
+    known_people,
 ):
 
     # ------------------------------------------------------------------------
-    # 본인 말투 학습
+    # self 말투 학습
     # ------------------------------------------------------------------------
 
     if (
@@ -1755,39 +2080,19 @@ def background_learning(
     except Exception as e:
 
         print(
-            f"[auto memory] 전체 실패: "
+            f"[auto memory] 실패: "
             f"{repr(e)}"
         )
 
 
 # ============================================================================
-# 실제 상호작용 추적
+# 실제 대화 상대
 # ============================================================================
 
 def get_interaction_context(
     db,
-    limit=500
+    limit=500,
 ):
-    """
-    방을 구분하지 않고 공용 Conversation에서
-    실제로 짭태양과 대화한 사람들을 추출한다.
-
-    중요:
-    Conversation에는 사용자 발화와 AI 발화가 모두 저장된다.
-
-    speaker_id == self
-        -> 짭태양 발화
-
-    그 외
-        -> 실제 상대 발화
-
-    따라서 여기 있는 사람은
-    "과거 Conversation DB에서 실제로 짭태양과 대화한 적이 있는 사람"
-    이다.
-
-    단순히 Person 목록에 존재한다고 해서
-    대화했다고 판단하지 않는다.
-    """
 
     rows = (
         db.query(Conversation)
@@ -1838,7 +2143,6 @@ def get_interaction_context(
             }
 
         people[speaker_id]["count"] += 1
-
         people[speaker_id]["last_message"] = (
             row.message
         )
@@ -1847,21 +2151,13 @@ def get_interaction_context(
 
 
 # ============================================================================
-# 사람 이름/별칭 추출
+# 언급 인물
 # ============================================================================
 
 def extract_mentioned_people(
     db,
-    text
+    text,
 ):
-    """
-    현재 질문에서 등록된 사람 이름/별칭이 언급됐는지 찾는다.
-
-    반환:
-        {
-            person_key: Person
-        }
-    """
 
     text = str(text or "")
 
@@ -1895,14 +2191,13 @@ def extract_mentioned_people(
             .all()
         )
 
-        for alias in aliases:
-
-            if alias.alias:
-                names.append(
-                    str(
-                        alias.alias
-                    ).strip()
-                )
+        names.extend(
+            [
+                str(alias.alias).strip()
+                for alias in aliases
+                if alias.alias
+            ]
+        )
 
         for name in names:
 
@@ -1917,28 +2212,59 @@ def extract_mentioned_people(
 
                 break
 
+    # ------------------------------------------------------------------------
+    # self 이름도 질문에서 찾는다.
+    # ------------------------------------------------------------------------
+
+    self_person = get_self_person(db)
+
+    if self_person:
+
+        names = []
+
+        if self_person.canonical_name:
+            names.append(
+                self_person.canonical_name
+            )
+
+        aliases = (
+            db.query(PersonAlias)
+            .filter_by(
+                person_id=self_person.id
+            )
+            .all()
+        )
+
+        names.extend(
+            [
+                alias.alias
+                for alias in aliases
+                if alias.alias
+            ]
+        )
+
+        for name in names:
+
+            if (
+                name
+                and name in text
+            ):
+
+                found["self"] = self_person
+                break
+
     return found
 
 
 # ============================================================================
-# 사람별 관계 / 기억 Context
+# Memory context
 # ============================================================================
 
 def get_memory_context_for_query(
     db,
     target_key,
-    user_input
+    user_input,
 ):
-    """
-    현재 상대의 기억 + 질문에서 언급된 인물의 기억을 가져온다.
-
-    예:
-    상대 = self
-    질문 = "만세 뭐 좋아해?"
-
-    -> self 기억만 보는 게 아니라
-       만세(person_001)의 기억도 같이 가져온다.
-    """
 
     mentioned_people = extract_mentioned_people(
         db,
@@ -1949,11 +2275,9 @@ def get_memory_context_for_query(
         target_key
     }
 
-    for person_key in mentioned_people:
-
-        relevant_keys.add(
-            person_key
-        )
+    relevant_keys.update(
+        mentioned_people.keys()
+    )
 
     all_memories = (
         db.query(Memory)
@@ -1968,10 +2292,6 @@ def get_memory_context_for_query(
     )
 
     selected = []
-
-    # ------------------------------------------------------------------------
-    # 질문에 직접 언급된 사람
-    # ------------------------------------------------------------------------
 
     keywords = [
         word
@@ -1989,21 +2309,26 @@ def get_memory_context_for_query(
             or []
         )
 
-        # 직접 관련된 사람
+        # 직접 관련 인물
         if any(
             key in involved
             for key in relevant_keys
         ):
 
-            selected.append(
-                mem
-            )
+            selected.append(mem)
             continue
 
-        # 이름/별칭을 통한 추가 검색
+        # 내용에 언급된 인물 이름이 있는 경우
         matched = False
 
-        for person_key, person_obj in mentioned_people.items():
+        for (
+            person_key,
+            person_obj
+        ) in mentioned_people.items():
+
+            names = [
+                person_obj.canonical_name
+            ]
 
             aliases = (
                 db.query(PersonAlias)
@@ -2013,14 +2338,11 @@ def get_memory_context_for_query(
                 .all()
             )
 
-            names = [
-                person_obj.canonical_name
-            ]
-
             names.extend(
                 [
                     alias.alias
                     for alias in aliases
+                    if alias.alias
                 ]
             )
 
@@ -2030,10 +2352,8 @@ def get_memory_context_for_query(
                     continue
 
                 if (
-                    name in str(mem.content)
-                    or any(
-                        name == str(x)
-                        for x in involved
+                    name in str(
+                        mem.content or ""
                     )
                 ):
 
@@ -2044,10 +2364,11 @@ def get_memory_context_for_query(
                 break
 
         if matched:
+
             selected.append(mem)
             continue
 
-        # 내용 키워드 검색
+        # 내용 키워드
         for keyword in keywords:
 
             if (
@@ -2060,12 +2381,7 @@ def get_memory_context_for_query(
                 selected.append(mem)
                 break
 
-    # ------------------------------------------------------------------------
-    # 최신순 / 중복 제거
-    # ------------------------------------------------------------------------
-
     result = []
-
     seen = set()
 
     for mem in selected:
@@ -2074,10 +2390,7 @@ def get_memory_context_for_query(
             continue
 
         seen.add(mem.id)
-
-        result.append(
-            mem
-        )
+        result.append(mem)
 
         if len(result) >= 80:
             break
@@ -2094,9 +2407,6 @@ class ChatRequest(BaseModel):
     sender: str
     message: str
 
-    # 현재 카카오봇이 안 보내도 됨.
-    # 나중에 room_members를 보내면
-    # 현재 방 참가자 context에 자동 반영한다.
     room_members: list[str] = Field(
         default_factory=list
     )
@@ -2111,22 +2421,22 @@ def health_check():
 
     return {
         "status": "ok",
-        "model": MODEL_NAME
+        "model": MODEL_NAME,
     }
 
 
 # ============================================================================
-# Chat Main Logic
+# Chat
 # ============================================================================
 
 @app.post("/chat")
 def reply_chat(
     req: ChatRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
 ):
 
     raw_input = str(
-        req.message
+        req.message or ""
     ).strip()
 
     if not raw_input:
@@ -2136,7 +2446,7 @@ def reply_chat(
         }
 
     # ------------------------------------------------------------------------
-    # @짭태양 / /짭태양 제거
+    # 호출 태그 제거
     # ------------------------------------------------------------------------
 
     user_input = (
@@ -2153,7 +2463,7 @@ def reply_chat(
         }
 
     # =========================================================================
-    # Person 확인
+    # sender -> Person
     # =========================================================================
 
     db = SessionLocal()
@@ -2191,12 +2501,12 @@ def reply_chat(
     conversation_key = target_key
 
     # =========================================================================
-    # 리셋
+    # Reset
     # =========================================================================
 
     if user_input in [
         "/리셋",
-        "/초기화"
+        "/초기화",
     ]:
 
         try:
@@ -2210,7 +2520,7 @@ def reply_chat(
             cur.execute(
                 "DELETE FROM messages "
                 "WHERE user_id = ?",
-                (conversation_key,)
+                (conversation_key,),
             )
 
             conn.commit()
@@ -2227,7 +2537,7 @@ def reply_chat(
             }
 
     # =========================================================================
-    # 수동 명령어
+    # 명령어
     # =========================================================================
 
     db = SessionLocal()
@@ -2238,7 +2548,7 @@ def reply_chat(
             "/이름목록",
             "/이름 목록",
             "/인물목록",
-            "/인물 목록"
+            "/인물 목록",
         ]:
 
             return {
@@ -2322,24 +2632,24 @@ def reply_chat(
         db.close()
 
     # =========================================================================
-    # 사용자 Conversation 기록
+    # Conversation - 사용자 발화
     # =========================================================================
 
     log_conversation(
         speaker_name=req.sender,
         target_key=target_key,
         message=req.message,
-        room_id="dm"
+        room_id="dm",
     )
 
     # =========================================================================
-    # 공용 뇌 - 기억 목록
+    # 기억 목록
     # =========================================================================
 
     if user_input in [
         "/기억목록",
         "/기억 목록",
-        "/기억리스트"
+        "/기억리스트",
     ]:
 
         db = SessionLocal()
@@ -2375,10 +2685,10 @@ def reply_chat(
                         map(
                             str,
                             m.people_involved
+                            or []
                         )
                     )
-                    if m.people_involved
-                    else "불명"
+                    or "불명"
                 )
 
                 status = (
@@ -2500,7 +2810,7 @@ def reply_chat(
                         if is_self
                         else Source.INFORMANT
                     ),
-                    status=ItemStatus.CONFIRMED
+                    status=ItemStatus.CONFIRMED,
                 )
 
                 db.add(new_memory)
@@ -2562,7 +2872,7 @@ def reply_chat(
         }
 
     # =========================================================================
-    # Context 준비
+    # Context
     # =========================================================================
 
     now_kst = datetime.now(
@@ -2604,7 +2914,7 @@ def reply_chat(
             (
                 conv.speaker_id,
                 conv.speaker_name,
-                conv.message
+                conv.message,
             )
             for conv in recent_convs
             if (
@@ -2629,7 +2939,7 @@ def reply_chat(
         db_history.close()
 
     # =========================================================================
-    # 기억 / 관계 조회
+    # Memory
     # =========================================================================
 
     interaction_context = {}
@@ -2642,18 +2952,19 @@ def reply_chat(
 
         try:
 
-            relevant_memories, mentioned_people = (
-                get_memory_context_for_query(
-                    db_mem,
-                    target_key,
-                    user_input
-                )
+            (
+                relevant_memories,
+                mentioned_people,
+            ) = get_memory_context_for_query(
+                db_mem,
+                target_key,
+                user_input,
             )
 
             interaction_context = (
                 get_interaction_context(
                     db_mem,
-                    limit=500
+                    limit=500,
                 )
             )
 
@@ -2668,86 +2979,8 @@ def reply_chat(
             f"{repr(e)}"
         )
 
-        relevant_memories = []
-        interaction_context = {}
-        mentioned_people = {}
-
     # =========================================================================
-    # 장기기억 문자열
-    # =========================================================================
-
-    user_memories = []
-
-    for mem in relevant_memories:
-
-        involved = (
-            mem.people_involved
-            or []
-        )
-
-        involved_str = (
-            ", ".join(
-                map(
-                    str,
-                    involved
-                )
-            )
-            if involved
-            else "불명"
-        )
-
-        source_kr = (
-            "직접 말한 정보"
-            if mem.source
-            == Source.DIRECT_STATEMENT
-            else "타인에게서 얻은 정보"
-        )
-
-        status_kr = (
-            "확정"
-            if mem.status
-            == ItemStatus.CONFIRMED
-            else "미확인"
-        )
-
-        category = (
-            mem.context
-            or "기타"
-        )
-
-        user_memories.append(
-            f"[{category}] "
-            f"[대상: {involved_str}] "
-            f"{mem.content} "
-            f"(출처: {source_kr}, "
-            f"상태: {status_kr})"
-        )
-
-    # =========================================================================
-    # 말투 예시
-    # =========================================================================
-
-    try:
-
-        style_examples = [
-            str(e).strip()
-            for e in (
-                legacy.get_relevant_style_samples(
-                    user_input,
-                    n=12
-                )
-            )
-            if should_learn_style(
-                str(e).strip()
-            )
-        ]
-
-    except Exception:
-
-        style_examples = []
-
-    # =========================================================================
-    # Person 정보
+    # Person
     # =========================================================================
 
     db = SessionLocal()
@@ -2787,6 +3020,7 @@ def reply_chat(
             alias_text = ", ".join(
                 alias.alias
                 for alias in aliases
+                if alias.alias
             )
 
             people_lines.append(
@@ -2806,7 +3040,7 @@ def reply_chat(
         db.close()
 
     # =========================================================================
-    # Gemini Context 조립
+    # Gemini context
     # =========================================================================
 
     contents = []
@@ -2816,20 +3050,101 @@ def reply_chat(
     ]
 
     # -------------------------------------------------------------------------
-    # 현재 상대
+    # 현재 발화자 Identity
     # -------------------------------------------------------------------------
 
     if person:
 
-        context_parts.append(
-            "[현재 상대]\n"
-            f"공식 이름: {person.canonical_name}\n"
-            f"Person key: {target_key}\n"
-            f"현재 sender: {req.sender}"
-        )
+        if target_key == "self":
+
+            context_parts.append(
+                "[현재 발화자 = 이태양 본인]\n"
+                "Person key: self\n"
+                f"현재 카카오톡 sender: {req.sender}\n"
+                f"등록된 본인 이름: {person.canonical_name}\n"
+                "중요: 현재 sender 이름은 프로필명일 뿐이며 "
+                "타인을 의미하지 않는다.\n"
+                "현재 발화자는 이태양 본인이다."
+            )
+
+        else:
+
+            context_parts.append(
+                "[현재 발화자 = 타인]\n"
+                f"Person key: {target_key}\n"
+                f"공식 이름: {person.canonical_name}\n"
+                f"현재 카카오톡 sender: {req.sender}\n"
+                "현재 발화자는 이태양이 아닌 타인이다."
+            )
 
     # -------------------------------------------------------------------------
-    # 현재 상대의 관계/기억 강조
+    # self Identity 별칭
+    # -------------------------------------------------------------------------
+
+    db_identity = SessionLocal()
+
+    try:
+
+        self_person = get_self_person(
+            db_identity
+        )
+
+        if self_person:
+
+            self_aliases = (
+                db_identity.query(
+                    PersonAlias
+                )
+                .filter_by(
+                    person_id=self_person.id
+                )
+                .order_by(
+                    PersonAlias.id.asc()
+                )
+                .all()
+            )
+
+            self_identities = (
+                db_identity.query(
+                    Identity
+                )
+                .filter_by(
+                    person_id=self_person.id,
+                    platform="kakaotalk",
+                )
+                .all()
+            )
+
+            alias_names = [
+                a.alias
+                for a in self_aliases
+                if a.alias
+            ]
+
+            identity_names = [
+                i.display_name
+                for i in self_identities
+                if i.display_name
+            ]
+
+            context_parts.append(
+                "[이태양 본인의 Identity]\n"
+                f"Person key: self\n"
+                f"본명/대표 이름: "
+                f"{self_person.canonical_name}\n"
+                f"별칭/프로필명: "
+                f"{', '.join(alias_names) or '-'}\n"
+                f"카카오톡 Identity: "
+                f"{', '.join(identity_names) or '-'}\n"
+                "위 이름들은 모두 같은 사람, 즉 이태양 본인을 가리킬 수 있다."
+            )
+
+    finally:
+
+        db_identity.close()
+
+    # -------------------------------------------------------------------------
+    # 현재 상대 관계 기억
     # -------------------------------------------------------------------------
 
     if target_key != "self":
@@ -2873,7 +3188,7 @@ def reply_chat(
             )
 
     # -------------------------------------------------------------------------
-    # 알고 있는 사람
+    # 알고 있는 인물
     # -------------------------------------------------------------------------
 
     if people_lines:
@@ -2886,7 +3201,7 @@ def reply_chat(
         )
 
     # -------------------------------------------------------------------------
-    # 실제 대화했던 사람
+    # 실제 대화 상대
     # -------------------------------------------------------------------------
 
     if interaction_context:
@@ -2895,7 +3210,7 @@ def reply_chat(
 
         for (
             person_key,
-            info
+            info,
         ) in interaction_context.items():
 
             interaction_lines.append(
@@ -2912,25 +3227,26 @@ def reply_chat(
                 interaction_lines
             )
             + "\n"
-            "위 목록은 Person 등록 여부가 아니라 "
-            "실제 Conversation DB 기록을 기준으로 한다."
+            "speaker_id=self인 기록은 이태양 본인의 발화이므로 "
+            "대화 상대 목록에 포함하지 않는다."
         )
 
     # -------------------------------------------------------------------------
-    # 현재 방 참가자
+    # 현재 방
     # -------------------------------------------------------------------------
 
     clean_members = []
 
     for name in req.room_members:
 
-        name = str(name).strip()
+        name = str(name or "").strip()
 
-        if name and name not in clean_members:
+        if (
+            name
+            and name not in clean_members
+        ):
 
-            clean_members.append(
-                name
-            )
+            clean_members.append(name)
 
     if clean_members:
 
@@ -2941,27 +3257,59 @@ def reply_chat(
                 for name in clean_members
             )
             + "\n"
-            "이 목록은 현재 방에 있는 사람이다. "
-            "과거 Conversation 기록과 별개로 판단한다."
+            "이 목록은 현재 방 참가자일 뿐이다. "
+            "과거 Conversation 기록과 혼동하지 않는다."
         )
 
     # -------------------------------------------------------------------------
-    # 질문에 관련된 장기기억
+    # 관련 장기기억
     # -------------------------------------------------------------------------
 
-    if user_memories:
+    if relevant_memories:
+
+        memory_lines = []
+
+        for mem in relevant_memories:
+
+            involved = (
+                ", ".join(
+                    map(
+                        str,
+                        mem.people_involved
+                        or []
+                    )
+                )
+                or "불명"
+            )
+
+            category = (
+                mem.context
+                or "기타"
+            )
+
+            status = (
+                "확정"
+                if mem.status
+                == ItemStatus.CONFIRMED
+                else "미확인"
+            )
+
+            memory_lines.append(
+                f"- [{category}] "
+                f"[대상: {involved}] "
+                f"{mem.content} "
+                f"({status})"
+            )
 
         context_parts.append(
-            "[현재 질문에 관련된 장기기억 "
-            "(공용 뇌)]\n"
+            "[현재 질문에 관련된 장기기억]\n"
             + "\n".join(
-                f"- {m}"
-                for m in user_memories
+                memory_lines
             )
         )
 
     # -------------------------------------------------------------------------
-    # 현재 질문에서 언급된 사람
+    # 언급 인물
     # -------------------------------------------------------------------------
 
     if mentioned_people:
@@ -2970,7 +3318,7 @@ def reply_chat(
 
         for (
             person_key,
-            person_obj
+            person_obj,
         ) in mentioned_people.items():
 
             mentioned_lines.append(
@@ -2989,6 +3337,25 @@ def reply_chat(
     # 실제 말투
     # -------------------------------------------------------------------------
 
+    try:
+
+        style_examples = [
+            str(e).strip()
+            for e in (
+                legacy.get_relevant_style_samples(
+                    user_input,
+                    n=12,
+                )
+            )
+            if should_learn_style(
+                str(e).strip()
+            )
+        ]
+
+    except Exception:
+
+        style_examples = []
+
     if style_examples:
 
         context_parts.append(
@@ -3000,7 +3367,7 @@ def reply_chat(
         )
 
     # -------------------------------------------------------------------------
-    # Context 전달
+    # Context
     # -------------------------------------------------------------------------
 
     contents.append(
@@ -3012,7 +3379,7 @@ def reply_chat(
                         context_parts
                     )
                 )
-            ]
+            ],
         )
     )
 
@@ -3021,9 +3388,9 @@ def reply_chat(
             role="model",
             parts=[
                 types.Part.from_text(
-                    text="응 확인햇어"
+                    text="ㅇㅋ 확인햇어"
                 )
-            ]
+            ],
         )
     )
 
@@ -3034,16 +3401,20 @@ def reply_chat(
     for (
         history_speaker_id,
         history_sender,
-        text
+        text,
     ) in recent_history:
 
-        text = str(text).strip()
+        text = str(text or "").strip()
 
         if (
             not text
             or is_command(text)
         ):
             continue
+
+        # ---------------------------------------------------------------------
+        # speaker_id=self -> 무조건 이태양 본인
+        # ---------------------------------------------------------------------
 
         if history_speaker_id == "self":
 
@@ -3067,30 +3438,43 @@ def reply_chat(
                     types.Part.from_text(
                         text=content_text
                     )
-                ]
+                ],
             )
         )
 
     # =========================================================================
-    # 현재 사용자 발화
+    # 현재 발화
     # =========================================================================
+
+    if target_key == "self":
+
+        current_text = (
+            f"[현재 발화자: 이태양 본인]\n"
+            f"[카카오톡 프로필명: {req.sender}]\n"
+            f"{user_input}"
+        )
+
+    else:
+
+        current_text = (
+            f"[현재 발화자: {person.canonical_name if person else req.sender}]\n"
+            f"[카카오톡 프로필명: {req.sender}]\n"
+            f"{user_input}"
+        )
 
     contents.append(
         types.Content(
             role="user",
             parts=[
                 types.Part.from_text(
-                    text=(
-                        f"[{req.sender}]: "
-                        f"{user_input}"
-                    )
+                    text=current_text
                 )
-            ]
+            ],
         )
     )
 
     # =========================================================================
-    # Gemini 생성
+    # Gemini
     # =========================================================================
 
     try:
@@ -3114,42 +3498,35 @@ def reply_chat(
             " "
         ).strip()
 
-        # ---------------------------------------------------------------------
-        # Markdown code fence 제거
-        # ---------------------------------------------------------------------
-
         reply = re.sub(
             r"^```(?:text)?\s*",
             "",
             reply,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         reply = re.sub(
             r"\s*```$",
             "",
-            reply
+            reply,
         ).strip()
 
-        if reply.startswith(
-            "```"
-        ):
+        if reply.startswith("```"):
 
             reply = re.sub(
                 r"^```.*?\n",
                 "",
                 reply,
-                flags=re.DOTALL
+                flags=re.DOTALL,
             )
 
             reply = re.sub(
                 r"\n```$",
                 "",
-                reply
+                reply,
             ).strip()
 
         if not reply:
-
             reply = "어왜ㅋ"
 
     except Exception as e:
@@ -3164,7 +3541,7 @@ def reply_chat(
         )
 
     # =========================================================================
-    # Legacy 저장
+    # Legacy
     # =========================================================================
 
     try:
@@ -3172,31 +3549,31 @@ def reply_chat(
         legacy.save_message(
             conversation_key,
             conversation_key,
-            user_input
+            user_input,
         )
 
         legacy.save_message(
             conversation_key,
             "이태양",
-            reply
+            reply,
         )
 
     except Exception:
         pass
 
     # =========================================================================
-    # AI 발화 Conversation 저장
+    # AI Conversation
     # =========================================================================
 
     log_conversation(
         speaker_name="이태양",
         target_key="self",
         message=reply,
-        room_id="dm"
+        room_id="dm",
     )
 
     # =========================================================================
-    # 백그라운드 학습
+    # Background learning
     # =========================================================================
 
     background_tasks.add_task(
@@ -3206,7 +3583,10 @@ def reply_chat(
         target_key,
         user_input,
         recent_history,
-        user_memories,
+        [
+            mem.content
+            for mem in relevant_memories
+        ],
         is_self,
         known_people_for_memory,
     )
