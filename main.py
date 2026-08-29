@@ -473,7 +473,7 @@ SYSTEM_INSTRUCTION_FOR_UNKNOWN = f"""
 
 
 # ---------------------------------------------------------------------------
-# 장기기억 판정 (people_involved 추가)
+# 장기기억 판정
 # ---------------------------------------------------------------------------
 def normalize_memory_category(category):
     category = str(category).strip().lower()
@@ -483,4 +483,399 @@ def normalize_memory_category(category):
 
 def parse_memory_judgement(text):
     if not text: return None
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*
+    cleaned = str(text).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
+
+    try: data = json.loads(cleaned)
+    except Exception:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match: return None
+        try: data = json.loads(match.group(0))
+        except Exception: return None
+
+    if not isinstance(data, dict): return None
+    save_value = data.get("save", False)
+    if isinstance(save_value, str):
+        save_value = (save_value.strip().lower() in ["true", "yes", "y", "1", "저장", "예"])
+    else: save_value = bool(save_value)
+
+    if not save_value: return {"save": False}
+
+    category = normalize_memory_category(data.get("category"))
+    memory = str(data.get("memory", "")).strip()[:300].rstrip()
+    people_involved = data.get("people_involved", [])
+    if not isinstance(people_involved, list): people_involved = []
+
+    if not memory: return {"save": False}
+    return {"save": True, "category": category, "memory": memory, "people_involved": people_involved}
+
+def judge_long_term_memory(user_input, recent_history=None, existing_memories=None):
+    if not user_input or len(str(user_input).strip()) < 4 or is_command(user_input): return None
+
+    history_text = "\n".join([f"{s}: {t}" for s, t in recent_history[-6:] if not is_command(t)]) if recent_history else ""
+    memory_text = "\n".join([f"- {m}" for m in existing_memories[-30:]]) if existing_memories else ""
+
+    prompt = f"""
+너는 장기기억 선별기다.
+사용자의 현재 발화를 보고 앞으로도 이 사람을 이해하는 데 도움이 될 만한 안정적인 정보만 장기기억으로 저장해라.
+
+[중요 변경점: 관련 인물 태깅]
+이 기억이 누구와 관련된 정보인지 파악해서 'people_involved' 리스트에 담아라.
+예) 본인이 "만세 매운거 환장함"이라고 했다면 -> ["만세"]
+예) 만세가 직접 "나 오이 싫어"라고 했다면 -> ["만세"]
+예) 본인이 "나는 야구가 좋아"라고 했다면 -> ["self"]
+
+반드시 JSON 하나만 반환한다.
+
+저장 예시:
+{{
+  "save": true,
+  "category": "취향",
+  "memory": "매운 것을 좋아함",
+  "people_involved": ["만세"]
+}}
+
+저장하지 않을 경우:
+{{ "save": false }}
+
+[현재 발화]
+{user_input}
+
+[최근 대화]
+{history_text or "(없음)"}
+
+[기존 장기기억]
+{memory_text or "(없음)"}
+"""
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_level="low"),
+                max_output_tokens=300, temperature=0.1, response_mime_type="application/json",
+            ),
+        )
+        return parse_memory_judgement(response.text if response else "")
+    except Exception as e:
+        print(f"[memory judge] 실패: {repr(e)}")
+        return None
+
+
+def save_auto_memory_if_worthy(conversation_key, user_input, is_self, recent_history=None, existing_memories=None):
+    result = judge_long_term_memory(user_input, recent_history, existing_memories)
+    if not result or not result.get("save"): return None
+
+    category = result.get("category", "기타")
+    memory = result.get("memory", "")
+    people = result.get("people_involved", [])
+
+    db = SessionLocal()
+    try:
+        existing = db.query(Memory).filter(Memory.persona_id == get_persona_id()).all()
+        normalized_new = memory.lower()
+        for old in existing:
+            if normalized_new in old.content.lower():
+                return None
+
+        new_memory = Memory(
+            persona_id=get_persona_id(),
+            memory_type=MemoryType.FACT,
+            content=memory,
+            context=category,
+            people_involved=people,
+            source=Source.DIRECT_STATEMENT if is_self else Source.INFORMANT,
+            status=ItemStatus.CONFIRMED if is_self else ItemStatus.CANDIDATE
+        )
+        db.add(new_memory)
+        db.commit()
+        print(f"[memory] 공용 뇌 자동 저장: {category} - {memory} (관련인물: {people})")
+        return {"category": category, "memory": memory}
+    except Exception as e:
+        print(f"[memory save] 실패: {repr(e)}")
+    finally:
+        db.close()
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 백그라운드 학습
+# ---------------------------------------------------------------------------
+def background_learning(conversation_key, user_input, recent_history, existing_memories, is_self):
+    if is_self and should_learn_style(user_input):
+        try: legacy.save_style_sample(user_input)
+        except: pass
+
+    try:
+        save_auto_memory_if_worthy(
+            conversation_key=conversation_key,
+            user_input=user_input,
+            is_self=is_self,
+            recent_history=recent_history,
+            existing_memories=existing_memories,
+        )
+    except Exception as e:
+        print(f"[auto memory] 전체 실패: {repr(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Request
+# ---------------------------------------------------------------------------
+class ChatRequest(BaseModel):
+    sender: str
+    message: str
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+@app.get("/")
+def health_check():
+    return {"status": "ok", "model": MODEL_NAME}
+
+
+# ---------------------------------------------------------------------------
+# Chat Main Logic
+# ---------------------------------------------------------------------------
+@app.post("/chat")
+def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
+    raw_input = str(req.message).strip()
+    if not raw_input: return {"reply": "뭐라고"}
+
+    user_input = raw_input.replace("@짭태양", "").replace("/짭태양", "").strip()
+    if not user_input: return {"reply": "ㅇㅇ"}
+
+    # Person 확인
+    db = SessionLocal()
+    try:
+        person, is_new_person = get_or_create_observed_person(db, req.sender)
+        target_key = person.person_key
+    except Exception as e:
+        print(f"[person] 처리 실패: {repr(e)}")
+        return {"reply": "사람 연결하는데 오류남;;"}
+    finally:
+        db.close()
+
+    is_self = (target_key == "self")
+    conversation_key = target_key
+
+    # 리셋 처리
+    if user_input in ["/리셋", "/초기화"]:
+        try:
+            conn = sqlite3.connect("taeyang.db")
+            cur = conn.cursor()
+            cur.execute("DELETE FROM messages WHERE user_id = ?", (conversation_key,))
+            conn.commit()
+            conn.close()
+            return {"reply": "대화기록초기화완료"}
+        except:
+            return {"reply": "초기화하다 오류남;;"}
+
+    # 수동 명령어 (기존 핸들러)
+    db = SessionLocal()
+    try:
+        if user_input in ["/이름목록", "/이름 목록", "/인물목록", "/인물 목록"]: return {"reply": command_name_list(db)}
+        if user_input.startswith("/이름삭제 "): return {"reply": command_name_delete(db, user_input[6:].strip())}
+        if user_input.startswith("/이름 "): return {"reply": command_name(db, req.sender, user_input[4:].strip())}
+        if user_input.startswith("/인물삭제 "): return {"reply": command_person_delete(db, user_input[6:].strip())}
+        if user_input.startswith("/인물병합 "):
+            args = user_input[6:].split()
+            if len(args) >= 2: return {"reply": command_person_merge(db, args[0], args[1])}
+        if user_input.startswith("/인물 "):
+            args = user_input[4:].split()
+            if args: return {"reply": command_person(db, args[0], args[1:])}
+    finally:
+        db.close()
+
+    log_conversation(speaker_name=req.sender, target_key=target_key, message=req.message, room_id="dm")
+
+    # ---------------------------------------------------------
+    # 공용 뇌 명령어 (조회/삭제/수동저장)
+    # ---------------------------------------------------------
+    if user_input in ["/기억목록", "/기억 목록", "/기억리스트"]:
+        db = SessionLocal()
+        try:
+            memories = db.query(Memory).filter(Memory.persona_id == get_persona_id()).all()
+            if not memories: return {"reply": "기억된 정보가 없어"}
+            lines = ["[장기기억 (공용 뇌)]"]
+            for m in memories:
+                involved = ", ".join(m.people_involved) if m.people_involved else "불명"
+                lines.append(f"[{m.id}] [대상:{involved}] {m.content}")
+            return {"reply": "\n".join(lines)}
+        finally: db.close()
+
+    if user_input.startswith("/기억삭제"):
+        target = user_input.replace("/기억삭제", "", 1).strip()
+        if target.isdigit():
+            db = SessionLocal()
+            try:
+                mem = db.query(Memory).filter(Memory.id == int(target)).first()
+                if mem:
+                    db.delete(mem)
+                    db.commit()
+                    return {"reply": f"기억삭제완료: [{target}]번"}
+                return {"reply": f"[{target}]번 기억을 찾을 수 없어"}
+            finally: db.close()
+        return {"reply": "기억 번호를 적어줘"}
+
+    if user_input.startswith("/기억 "):
+        mem_text = user_input[4:].strip()
+        if mem_text:
+            db = SessionLocal()
+            try:
+                new_memory = Memory(
+                    persona_id=get_persona_id(),
+                    memory_type=MemoryType.FACT,
+                    content=mem_text,
+                    context="기타",
+                    people_involved=[target_key],
+                    source=Source.DIRECT_STATEMENT if is_self else Source.INFORMANT,
+                    status=ItemStatus.CONFIRMED if is_self else ItemStatus.CANDIDATE
+                )
+                db.add(new_memory)
+                db.commit()
+                return {"reply": f"응기억햇어: {mem_text}"}
+            finally: db.close()
+        return {"reply": "기억할 내용을 적어줘"}
+
+    if user_input.startswith("/말투 "):
+        style_text = user_input[4:].strip()
+        if style_text and should_learn_style(style_text):
+            try: legacy.save_style_sample(style_text)
+            except: pass
+            return {"reply": f"응 이것도 배웟어: {style_text}"}
+        return {"reply": "배울 말투를 적어줘"}
+
+    # ---------------------------------------------------------
+    # Context 준비
+    # ---------------------------------------------------------
+    now_kst = datetime.now(KST).strftime("%Y년 %m월 %d일 %H시 %M분")
+
+    db_history = SessionLocal()
+    try:
+        recent_convs = db_history.query(Conversation).order_by(Conversation.id.desc()).limit(8).all()
+        recent_history = [(conv.speaker_name, conv.message) for conv in reversed(recent_convs)]
+    except Exception as e:
+        print(f"[history load error] {repr(e)}")
+        recent_history = []
+    finally:
+        db_history.close()
+
+    try:
+        mentioned_keywords = [word for word in user_input.split() if len(word) >= 2]
+        db_mem = SessionLocal()
+        all_memories = db_mem.query(Memory).filter(Memory.persona_id == get_persona_id()).all()
+        
+        user_memories = []
+        for mem in all_memories:
+            involved = mem.people_involved or []
+            is_relevant = (target_key in involved)
+            if not is_relevant:
+                for keyword in mentioned_keywords:
+                    if any(keyword in str(person) for person in involved):
+                        is_relevant = True
+                        break
+            if is_relevant:
+                source_kr = "본인(너)이 주입함" if mem.source == Source.DIRECT_STATEMENT else "타인과의 대화에서 얻음"
+                involved_str = ", ".join(involved) if involved else "불명"
+                user_memories.append(f"[대상: {involved_str}] {mem.content} (출처: {source_kr})")
+        db_mem.close()
+    except Exception as e:
+        print(f"[memory load error] {repr(e)}")
+        user_memories = []
+
+    try:
+        style_examples = [str(e).strip() for e in legacy.get_relevant_style_samples(user_input, n=12) if should_learn_style(str(e).strip())]
+    except:
+        style_examples = []
+
+    if is_self: system_instruction = SYSTEM_INSTRUCTION_FOR_SELF
+    elif target_key == "cha": system_instruction = SYSTEM_INSTRUCTION_FOR_CHA
+    else: system_instruction = SYSTEM_INSTRUCTION_FOR_UNKNOWN
+
+    db = SessionLocal()
+    person = None
+    people_lines = []
+    try:
+        person = get_person_by_key(db, target_key)
+        known_people = db.query(Person).filter_by(status="active").order_by(Person.id.asc()).limit(100).all()
+        for known_person in known_people:
+            aliases = db.query(PersonAlias).filter_by(person_id=known_person.id).order_by(PersonAlias.id.asc()).all()
+            alias_text = ", ".join(alias.alias for alias in aliases)
+            people_lines.append(f"{known_person.person_key}: {known_person.canonical_name} ({alias_text})")
+    finally:
+        db.close()
+
+    # ---------------------------------------------------------
+    # Gemini Context 조립
+    # ---------------------------------------------------------
+    contents = []
+    context_parts = [f"[현재 한국 시각]: {now_kst}"]
+    if person: context_parts.append(f"[현재 상대]: {person.canonical_name} / {target_key}")
+    if people_lines: context_parts.append("[알고 있는 인물 목록]\n" + "\n".join(people_lines))
+    if user_memories: context_parts.append("[대화 관련 장기기억 (공용 뇌)]\n" + "\n".join(f"- {m}" for m in user_memories))
+    if style_examples: context_parts.append("[실제 말투 예시]\n" + "\n".join(f"- {e}" for e in style_examples))
+
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="\n\n".join(context_parts))]))
+    contents.append(types.Content(role="model", parts=[types.Part.from_text(text="응 확인햇어")]))
+
+    for (history_sender, text) in recent_history:
+        text = str(text).strip()
+        if not text or is_command(text): continue
+        
+        if history_sender == "이태양":
+            role = "model"
+            content_text = text
+        else:
+            role = "user"
+            content_text = f"[{history_sender}]: {text}"
+            
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=content_text)]))
+
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=f"[{req.sender}]: {user_input}")]))
+
+    # ---------------------------------------------------------
+    # 생성 및 정리
+    # ---------------------------------------------------------
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                thinking_config=types.ThinkingConfig(thinking_level="medium"),
+                max_output_tokens=1200,
+            ),
+        )
+        reply = str(response.text or "").replace("\r", " ").strip()
+        reply = re.sub(r"^```(?:text)?\s*", "", reply, flags=re.IGNORECASE)
+        reply = re.sub(r"\s*```$", "", reply).strip()
+        if reply.startswith("```"):
+            reply = re.sub(r"^```.*?\n", "", reply, flags=re.DOTALL)
+            reply = re.sub(r"\n```$", "", reply).strip()
+        if not reply: reply = "어왜ㅋ"
+    except Exception as e:
+        print(f"[Gemini ERROR] {repr(e)}")
+        reply = "서버에서 모델응답 오류남;;"
+
+    # ---------------------------------------------------------
+    # 저장 및 큐 등록
+    # ---------------------------------------------------------
+    try:
+        legacy.save_message(conversation_key, conversation_key, user_input)
+        legacy.save_message(conversation_key, "이태양", reply)
+    except: pass
+    log_conversation(speaker_name="이태양", target_key="self", message=reply, room_id="dm")
+
+    background_tasks.add_task(
+        background_learning,
+        conversation_key,
+        user_input,
+        recent_history,
+        user_memories,
+        is_self,
+    )
+
+    return {"reply": reply}
