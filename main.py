@@ -11,7 +11,7 @@
 - 장기기억 가치가 있는 내용 자동 선별
 - 장기기억 카테고리 지원
 - /기억목록 카테고리별 표시
-- 기존 DB 구조 최대한 유지
+- 명령어는 말투/장기기억 학습에서 제외
 """
 
 import os
@@ -89,16 +89,11 @@ client = genai.Client(
 # ---------------------------------------------------------------------------
 # 모델
 # ---------------------------------------------------------------------------
-#
-# 기존 Flash 유지.
-# thinking_level은 low -> medium으로 올려서
-# 너무 성급하게 끊기는 문제를 줄인다.
-#
-# 만약 현재 Google AI 계정에서 사용 중인 모델명이 이미 정상 작동한다면
-# 이 값은 그대로 유지하면 된다.
-#
 
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = os.environ.get(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash",
+)
 
 
 KST = timezone(
@@ -214,11 +209,6 @@ def get_person_by_identity(
 
 
 def make_person_key(db):
-    """
-    person_001
-    person_002
-    ...
-    """
 
     rows = (
         db.query(Person)
@@ -259,15 +249,6 @@ def get_or_create_observed_person(
     db,
     display_name,
 ):
-    """
-    실제 카톡 sender를 Person으로 해석한다.
-
-    우선순위:
-
-    1. Identity
-    2. Alias
-    3. 신규 Person
-    """
 
     display_name = display_name.strip()
 
@@ -407,22 +388,6 @@ def command_name(
     sender,
     new_name,
 ):
-    """
-    현재 카카오톡 sender를 self로 연결한다.
-
-    예:
-
-        sender = 시연
-
-        /이름 이태양
-
-    결과:
-
-        시연 -> self
-        이태양 -> self
-
-    기존 대화/기억은 삭제하지 않는다.
-    """
 
     sender = sender.strip()
     new_name = new_name.strip()
@@ -609,7 +574,6 @@ def command_name(
         )
 
         if other_alias_count == 0:
-
             old_person.status = "inactive"
 
     db.commit()
@@ -692,11 +656,6 @@ def command_name_delete(
     db,
     name,
 ):
-    """
-    이름 연결만 삭제한다.
-
-    Person / 대화 / 기억은 삭제하지 않는다.
-    """
 
     name = name.strip()
 
@@ -717,7 +676,6 @@ def command_name_delete(
     for identity in identities:
 
         db.delete(identity)
-
         deleted = True
 
     aliases = (
@@ -731,7 +689,6 @@ def command_name_delete(
     for alias in aliases:
 
         db.delete(alias)
-
         deleted = True
 
     if not deleted:
@@ -756,6 +713,7 @@ def command_person(
     canonical_name,
     aliases,
 ):
+
     canonical_name = canonical_name.strip()
 
     if not canonical_name:
@@ -896,7 +854,6 @@ def command_person_delete(
     )
 
     for identity in identities:
-
         identity.is_primary = 0
 
     db.commit()
@@ -963,11 +920,9 @@ def command_person_merge(
         )
 
         if duplicate:
-
             db.delete(alias)
 
         else:
-
             alias.person_id = (
                 target_person.id
             )
@@ -1040,12 +995,157 @@ def log_conversation(
     except Exception as e:
 
         print(
-            f"[log_conversation] 실패: {e}"
+            f"[log_conversation] 실패: {repr(e)}"
         )
 
     finally:
 
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 명령어 판별
+# ---------------------------------------------------------------------------
+#
+# 중요:
+# "/이름목록" 같은 실제 명령어만 제외한다.
+#
+# 문장 중간에 "/"가 들어간 것은 정상 발화로 취급한다.
+#
+# 예:
+#   /이름목록          -> 명령어
+#   /기억목록          -> 명령어
+#   이거 / 저거        -> 정상 발화
+#   오늘 / 내일        -> 정상 발화
+#   /말투 안녕         -> 명령어
+#
+# ---------------------------------------------------------------------------
+
+def is_learning_excluded_command(
+    text,
+):
+    """
+    말투/장기기억 학습에서 제외해야 하는
+    봇 명령어인지 판별한다.
+
+    명령어 처리 자체와 별개로
+    과거 DB의 명령어도 걸러내기 위해 사용한다.
+    """
+
+    if not text:
+        return False
+
+    value = str(text).strip()
+
+    if not value.startswith("/"):
+        return False
+
+    exact_commands = {
+        "/이름목록",
+        "/이름 목록",
+        "/인물목록",
+        "/인물 목록",
+        "/기억목록",
+        "/기억 목록",
+        "/기억리스트",
+        "/리셋",
+        "/초기화",
+    }
+
+    if value in exact_commands:
+        return True
+
+    command_prefixes = [
+        "/이름 ",
+        "/이름삭제 ",
+        "/인물 ",
+        "/인물삭제 ",
+        "/인물병합 ",
+        "/기억 ",
+        "/기억삭제 ",
+        "/말투 ",
+    ]
+
+    for prefix in command_prefixes:
+
+        if value.startswith(prefix):
+            return True
+
+    return False
+
+
+def filter_learning_history(
+    history,
+):
+    """
+    최근 대화 중 명령어를 제거한다.
+
+    기존 DB에 과거 명령어가 들어있어도
+    앞으로 말투 학습에 섞이지 않게 한다.
+    """
+
+    if not history:
+        return []
+
+    filtered = []
+
+    for item in history:
+
+        try:
+
+            sender, text = item
+
+        except Exception:
+
+            continue
+
+        if is_learning_excluded_command(
+            text
+        ):
+            continue
+
+        filtered.append(
+            (
+                sender,
+                text,
+            )
+        )
+
+    return filtered
+
+
+def filter_style_examples(
+    examples,
+):
+    """
+    기존 style_samples.txt / legacy DB에
+    명령어가 들어있더라도 모델에게 넘기지 않는다.
+    """
+
+    if not examples:
+        return []
+
+    filtered = []
+
+    for example in examples:
+
+        text = str(
+            example
+        ).strip()
+
+        if not text:
+            continue
+
+        if is_learning_excluded_command(
+            text
+        ):
+            continue
+
+        filtered.append(
+            text
+        )
+
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -1055,12 +1155,14 @@ def log_conversation(
 STYLE_RULES = """
 [문장 형식]
 1. 카카오톡처럼 자연스럽게 말한다.
-2. 짧게 말하는 걸 기본으로 한다.
+2. 무조건 짧게 만들지 않는다.
 3. 단순한 질문은 짧게 답한다.
-4. 생각이 필요한 질문은 필요한 만큼 충분히 생각해서 답한다.
-5. 한 줄을 기본으로 하지만 내용상 필요하면 여러 줄을 사용할 수 있다.
+4. 생각이 필요한 질문은 충분히 생각한 뒤 답한다.
+5. 필요한 경우 여러 문장으로 설명한다.
 6. 설명문이나 고객센터 답변처럼 말하지 않는다.
 7. 질문의 난이도에 맞춰 답변 길이를 조절한다.
+8. 모델이 답변을 생성하다가 토큰 제한으로 중간에서 잘린 것처럼 보이는 답변은 만들지 않는다.
+9. 답변을 실제로 끝낼 때는 자연스럽게 끝낸다.
 
 [말투]
 1. 반말.
@@ -1070,9 +1172,17 @@ STYLE_RULES = """
 5. ㅋㅋㅋ / ㅋㅎㅋㅎ / ㅡㅡ / ㅎ;; 같은 표현은 상황에 맞을 때만 사용한다.
 6. 문장부호는 최소화한다.
 7. 긍정할 때 무조건 ㅇㅇ만 반복하지 않는다.
-8. 실제 카톡에서 사람이 쓸 법한 불완전한 문장을 허용한다.
+8. 실제 카톡에서 사람이 쓸 법한 불완전한 표현을 허용한다.
 9. 억지로 웃기려고 하지 않는다.
 10. 상대가 진지한 질문을 하면 말투는 자연스럽게 유지하되 내용은 정확하게 답한다.
+
+[중요]
+1. "짧게 말한다"와 "답변이 잘린다"는 전혀 다른 것이다.
+2. 답변을 중간에서 끊어서 미완성으로 보내지 않는다.
+3. "근데 이건.."처럼 자연스러운 말투 표현은 사용할 수 있지만,
+   모델 출력이 토큰 제한 때문에 잘린 것처럼 끝내지는 않는다.
+4. 충분히 생각할 필요가 있는 질문은 생각할 시간을 사용해서 답한다.
+5. 생각한 결과를 무조건 장황하게 설명하지 않는다.
 
 [금지]
 1. "무엇을 도와드릴까요?"
@@ -1080,11 +1190,12 @@ STYLE_RULES = """
 3. "좋은 하루 보내세요"
 4. AI/시스템/프롬프트/모델이라는 말을 먼저 꺼내지 않는다.
 5. 자신을 챗봇이라고 설명하지 않는다.
+6. 사용자의 명령어를 말투 특징으로 따라 하지 않는다.
 """
 
 
 SYSTEM_INSTRUCTION_FOR_SELF = f"""
-너는 실제 인물의 말투와 성향을 학습하는 AI 클론 '짭태양'이다.
+너는 실제 인물의 말투와 성향을 학습하는 AI 페르소나 '짭태양'이다.
 
 현재 상대는 페르소나의 실제 본인이다.
 
@@ -1098,6 +1209,12 @@ SYSTEM_INSTRUCTION_FOR_SELF = f"""
 
 질문이 단순하면 짧게 답하고,
 생각이 필요한 질문은 충분히 생각한 뒤 답한다.
+
+실제 말투 예시에서 나타나는 표현 방식,
+어미, 말버릇, 문장 길이, 줄임말 등을 참고한다.
+
+단, /이름목록 /기억목록 /이름삭제 같은
+봇 명령어는 사용자의 말투 특징으로 취급하지 않는다.
 
 {STYLE_RULES}
 """
@@ -1147,23 +1264,22 @@ MEMORY_CATEGORIES = {
 }
 
 
-def normalize_memory_category(category):
-    """
-    Gemini가 조금 이상한 값을 반환해도
-    허용된 카테고리로 안전하게 정리한다.
-    """
+def normalize_memory_category(
+    category,
+):
 
     if not category:
         return "기타"
 
-    category = str(category).strip()
+    category = str(
+        category
+    ).strip()
 
     for key in MEMORY_CATEGORIES:
 
         if category == key:
             return key
 
-    # 영어/변형 대응
     mapping = {
         "preference": "취향",
         "preferences": "취향",
@@ -1185,19 +1301,14 @@ def make_categorized_memory(
     category,
     memory,
 ):
-    """
-    기존 legacy memory 저장 구조를 건드리지 않고
-    기억 텍스트 앞에 카테고리를 붙인다.
-
-    예:
-        [취향] 야구를 좋아함
-    """
 
     category = normalize_memory_category(
         category
     )
 
-    memory = str(memory).strip()
+    memory = str(
+        memory
+    ).strip()
 
     if not memory:
         return ""
@@ -1207,14 +1318,13 @@ def make_categorized_memory(
     )
 
 
-def parse_memory_category(memory):
-    """
-    기존 기억도 안전하게 처리한다.
+def parse_memory_category(
+    memory,
+):
 
-    카테고리 prefix가 없는 오래된 기억은 기타로 표시.
-    """
-
-    text = str(memory).strip()
+    text = str(
+        memory
+    ).strip()
 
     match = re.match(
         r"^\[(취향|사람|관계|사실|기타)\]\s*(.*)$",
@@ -1234,15 +1344,16 @@ def parse_memory_category(memory):
     )
 
 
-def clean_json_text(text):
-    """
-    Gemini가 ```json ... ``` 형태로 반환하는 경우 제거.
-    """
+def clean_json_text(
+    text,
+):
 
     if not text:
         return ""
 
-    text = str(text).strip()
+    text = str(
+        text
+    ).strip()
 
     text = re.sub(
         r"^```(?:json)?\s*",
@@ -1260,27 +1371,22 @@ def clean_json_text(text):
     return text.strip()
 
 
-def parse_memory_judgement(text):
-    """
-    Gemini 장기기억 판정 결과를 최대한 보수적으로 파싱한다.
-
-    기대:
-    {
-        "save": true,
-        "category": "취향",
-        "memory": "야구를 좋아함"
-    }
-    """
+def parse_memory_judgement(
+    text,
+):
 
     if not text:
         return None
 
-    cleaned = clean_json_text(text)
+    cleaned = clean_json_text(
+        text
+    )
 
-    # 가장 바깥 JSON 객체만 추출 시도
     try:
 
-        data = json.loads(cleaned)
+        data = json.loads(
+            cleaned
+        )
 
     except Exception:
 
@@ -1303,7 +1409,10 @@ def parse_memory_judgement(text):
 
             return None
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict,
+    ):
         return None
 
     save_value = data.get(
@@ -1311,7 +1420,10 @@ def parse_memory_judgement(text):
         False,
     )
 
-    if isinstance(save_value, str):
+    if isinstance(
+        save_value,
+        str,
+    ):
 
         save_value = (
             save_value.strip().lower()
@@ -1341,7 +1453,10 @@ def parse_memory_judgement(text):
     )
 
     memory = str(
-        data.get("memory", "")
+        data.get(
+            "memory",
+            "",
+        )
     ).strip()
 
     if not memory:
@@ -1349,11 +1464,11 @@ def parse_memory_judgement(text):
             "save": False
         }
 
-    # 너무 긴 기억은 저장하지 않는다.
-    # 장기기억은 한두 문장으로 압축한다.
     if len(memory) > 300:
-
-        memory = memory[:300].rstrip()
+        memory = (
+            memory[:300]
+            .rstrip()
+        )
 
     return {
         "save": True,
@@ -1367,27 +1482,20 @@ def judge_long_term_memory(
     recent_history=None,
     existing_memories=None,
 ):
-    """
-    현재 사용자의 발화가 장기기억으로 남을 가치가 있는지
-    별도의 짧은 Gemini 호출로 판단한다.
-
-    중요한 원칙:
-    - 평범한 일상 대화는 저장하지 않음
-    - 단순 감정/현재 상태는 기본적으로 저장하지 않음
-    - 명시적인 자기정보는 저장 후보
-    - 반복적으로 중요한 취향/관계/사실은 저장 후보
-    - 저장하지 않는다고 판단하면 아무것도 하지 않음
-    - 이 함수가 실패해도 본 답변에는 영향 없음
-    """
 
     if not user_input:
         return None
 
-    # 너무 짧은 말은 애초에 판정하지 않는다.
-    if len(user_input.strip()) < 4:
+    if is_learning_excluded_command(
+        user_input
+    ):
         return None
 
-    # 명백한 잡담/반응은 호출 자체를 줄인다.
+    if len(
+        user_input.strip()
+    ) < 4:
+        return None
+
     skip_patterns = [
         r"^ㅋㅋ+$",
         r"^ㅋ+$",
@@ -1421,6 +1529,11 @@ def judge_long_term_memory(
 
         for sender, text in recent_history[-6:]:
 
+            if is_learning_excluded_command(
+                text
+            ):
+                continue
+
             history_lines.append(
                 f"{sender}: {text}"
             )
@@ -1433,8 +1546,6 @@ def judge_long_term_memory(
 
     if existing_memories:
 
-        # 기존 기억이 너무 많아져도
-        # 판정 프롬프트가 무한히 커지지 않게 한다.
         limited_memories = (
             existing_memories[-30:]
         )
@@ -1470,6 +1581,7 @@ def judge_long_term_memory(
 - 지금 대화에서만 필요한 정보
 - AI가 추측해야 하는 정보
 - 근거가 약한 성격 추론
+- 봇 명령어
 
 중요:
 사용자가 직접 말한 사실을 우선한다.
@@ -1531,8 +1643,7 @@ def judge_long_term_memory(
                             thinking_level="low"
                         )
                     ),
-                    max_output_tokens=180,
-                    temperature=0.1,
+                    max_output_tokens=512,
                     response_mime_type="application/json",
                 ),
             )
@@ -1553,7 +1664,6 @@ def judge_long_term_memory(
             f"{repr(e)}"
         )
 
-        # 기억 판정 실패는 절대 전체 채팅 실패로 만들지 않는다.
         return None
 
 
@@ -1563,13 +1673,6 @@ def save_auto_memory_if_worthy(
     recent_history=None,
     existing_memories=None,
 ):
-    """
-    장기기억 자동 선별 + 저장.
-
-    반환:
-        저장된 기억 dict
-        또는 None
-    """
 
     result = judge_long_term_memory(
         user_input=user_input,
@@ -1588,7 +1691,10 @@ def save_auto_memory_if_worthy(
     )
 
     memory = str(
-        result.get("memory", "")
+        result.get(
+            "memory",
+            "",
+        )
     ).strip()
 
     if not memory:
@@ -1628,17 +1734,20 @@ def save_auto_memory_if_worthy(
                 )
             )
 
-            if (
+            old_normalized = (
                 old_text.strip().lower()
+            )
+
+            if (
+                old_normalized
                 == normalized_new
             ):
                 return None
 
-            # 기존 기억이 정확히 새 기억을 포함하는 경우
             if (
                 len(normalized_new) >= 8
                 and normalized_new
-                in old_text.lower()
+                in old_normalized
             ):
                 return None
 
@@ -1683,12 +1792,6 @@ def save_auto_memory_if_worthy(
 def format_memory_list(
     rows,
 ):
-    """
-    /기억목록 출력용.
-
-    rows:
-        [(id, memory), ...]
-    """
 
     if not rows:
         return "기억된 정보가 없어"
@@ -1947,6 +2050,10 @@ def reply_chat(
 
     # ---------------------------------------------------------
     # Command
+    #
+    # 명령어는 여기서 바로 반환한다.
+    # 따라서 일반 대화 / 말투 학습 / 장기기억 학습에
+    # 들어가지 않는다.
     # ---------------------------------------------------------
 
     command_reply = handle_command(
@@ -2006,7 +2113,6 @@ def reply_chat(
         room_id="dm",
     )
 
-    # legacy conversation key
     conversation_key = target_key
 
     # ---------------------------------------------------------
@@ -2261,15 +2367,29 @@ def reply_chat(
 
     # ---------------------------------------------------------
     # 최근 대화
+    #
+    # 명령어가 과거 DB에 남아 있더라도
+    # 모델의 학습/맥락에서는 제외한다.
     # ---------------------------------------------------------
 
     try:
 
-        recent_history = (
+        recent_history_raw = (
             legacy.get_recent_messages(
                 conversation_key,
-                limit=8,
+                limit=12,
             )
+        )
+
+        recent_history = (
+            filter_learning_history(
+                recent_history_raw
+            )
+        )
+
+        # 너무 길어지지 않게 최종 8개만 사용
+        recent_history = (
+            recent_history[-8:]
         )
 
     except Exception as e:
@@ -2307,11 +2427,22 @@ def reply_chat(
 
     try:
 
-        style_examples = (
+        style_examples_raw = (
             legacy.get_relevant_style_samples(
                 user_input,
-                n=10,
+                n=20,
             )
+        )
+
+        style_examples = (
+            filter_style_examples(
+                style_examples_raw
+            )
+        )
+
+        # 최종적으로 10개만 모델에 전달
+        style_examples = (
+            style_examples[-10:]
         )
 
     except Exception as e:
@@ -2326,13 +2457,17 @@ def reply_chat(
     # ---------------------------------------------------------
     # 장기기억 자동 선별
     #
-    # 본인(self)이 말한 경우에만 자동 장기기억 후보로 본다.
-    #
-    # 중요:
-    # 이 부분이 실패해도 Gemini 답변에는 영향 없음.
+    # self가 말한 경우에만 자동 저장.
+    # 명령어는 위에서 이미 return됐지만
+    # 이중으로 방어한다.
     # ---------------------------------------------------------
 
-    if is_self:
+    if (
+        is_self
+        and not is_learning_excluded_command(
+            user_input
+        )
+    ):
 
         try:
 
@@ -2347,7 +2482,6 @@ def reply_chat(
 
             if saved_memory:
 
-                # 현재 응답에도 방금 생긴 기억을 반영
                 user_memories = (
                     list(user_memories)
                     + [
@@ -2371,9 +2505,17 @@ def reply_chat(
 
     # ---------------------------------------------------------
     # 본인이 직접 한 말이면 말투 학습
+    #
+    # 명령어는 절대 저장하지 않는다.
     # ---------------------------------------------------------
 
-    if is_self and user_input:
+    if (
+        is_self
+        and user_input
+        and not is_learning_excluded_command(
+            user_input
+        )
+    ):
 
         try:
 
@@ -2605,16 +2747,19 @@ def reply_chat(
                         system_instruction
                     ),
 
-                    # 너무 성급하게 답하지 않도록
-                    # low -> medium
+                    # 충분히 생각할 수 있게 유지
                     thinking_config=(
                         types.ThinkingConfig(
                             thinking_level="medium"
                         )
                     ),
 
-                    # 답변이 중간에 잘리지 않게
-                    max_output_tokens=300,
+                    # 기존 300 -> 2048
+                    #
+                    # 짧은 카톡은 여전히 짧게 나오고
+                    # 생각이 필요한 답변이 토큰 제한 때문에
+                    # 중간에서 잘릴 가능성을 크게 낮춘다.
+                    max_output_tokens=2048,
                 ),
             )
         )
@@ -2635,12 +2780,11 @@ def reply_chat(
         reply = (
             str(raw_reply)
             .replace("\r", " ")
-            .replace("\n", " ")
             .strip()
         )
 
         # -----------------------------------------------------
-        # 모델이 실수로 JSON을 답변으로 뱉는 경우 방어
+        # 모델이 실수로 코드블록 형태로 답한 경우
         # -----------------------------------------------------
 
         if reply.startswith(
@@ -2648,7 +2792,7 @@ def reply_chat(
         ):
 
             reply = re.sub(
-                r"^```.*?\n",
+                r"^```[^\n]*\n",
                 "",
                 reply,
                 flags=re.DOTALL,
