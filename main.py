@@ -1,17 +1,20 @@
 """
-장산범 Persona Engine v2 - main.py
+장산범 Persona Engine v3 - main.py
 
-핵심:
+핵심
 - /이름 이태양 -> 현재 sender를 self로 연결
-- 이후 해당 sender는 self로 인식
+- sender -> self Identity 유지
 - Identity / Person / Alias 분리
 - 기존 legacy 기억/대화 유지
 - 기존 /chat 계약 유지
 - 본인(self) 대화의 말투 자동 학습
-- 장기기억 가치가 있는 내용 자동 선별
+- 장기기억 자동 선별
 - 장기기억 카테고리 지원
 - /기억목록 카테고리별 표시
-- 명령어는 말투/장기기억 학습에서 제외
+- 명령어는 절대로 말투 학습 데이터로 저장하지 않음
+- 명령어가 최근 대화/말투 예시에 섞여도 모델이 따라하지 않도록 방어
+- Gemini 응답 토큰 여유 확보
+- 장기기억 판정은 백그라운드에서 처리하여 응답 지연 최소화
 """
 
 import os
@@ -21,7 +24,7 @@ import json
 
 from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 
 from google import genai
@@ -40,7 +43,6 @@ from models import (
     PersonAlias,
     Identity,
     Conversation,
-    PersonaRelationship,
     Source,
 )
 
@@ -51,7 +53,13 @@ import seed_and_migrate
 # 초기화
 # ---------------------------------------------------------------------------
 
-seed_and_migrate.run()
+init_db()
+
+try:
+    seed_and_migrate.run()
+except Exception as e:
+    print(f"[seed] 실행 실패: {repr(e)}")
+
 
 try:
     imported_count = legacy.import_style_samples(
@@ -71,9 +79,7 @@ except Exception as e:
     )
 
 
-GEMINI_API_KEY = os.environ.get(
-    "GEMINI_API_KEY"
-)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
     raise RuntimeError(
@@ -87,8 +93,16 @@ client = genai.Client(
 
 
 # ---------------------------------------------------------------------------
-# 모델
+# Gemini 모델
 # ---------------------------------------------------------------------------
+#
+# 환경변수 GEMINI_MODEL이 있으면 그 값을 사용.
+# 없으면 기존 사용 모델 사용.
+#
+# Render 환경변수에서 모델명을 바꾸고 싶으면
+# GEMINI_MODEL=사용할모델명
+# 으로 지정하면 됨.
+#
 
 MODEL_NAME = os.environ.get(
     "GEMINI_MODEL",
@@ -132,12 +146,9 @@ def get_persona_id():
                     "태양 Persona가 없습니다."
                 )
 
-            _PERSONA_ID_CACHE["id"] = (
-                persona.id
-            )
+            _PERSONA_ID_CACHE["id"] = persona.id
 
         finally:
-
             db.close()
 
     return _PERSONA_ID_CACHE["id"]
@@ -166,7 +177,7 @@ def get_person_by_alias(
     alias,
 ):
 
-    alias = alias.strip()
+    alias = str(alias).strip()
 
     if not alias:
         return None
@@ -188,7 +199,7 @@ def get_person_by_identity(
     display_name,
 ):
 
-    display_name = display_name.strip()
+    display_name = str(display_name).strip()
 
     if not display_name:
         return None
@@ -213,9 +224,7 @@ def make_person_key(db):
     rows = (
         db.query(Person)
         .filter(
-            Person.person_key.like(
-                "person_%"
-            )
+            Person.person_key.like("person_%")
         )
         .all()
     )
@@ -236,9 +245,7 @@ def make_person_key(db):
                 int(match.group(1)),
             )
 
-    return (
-        f"person_{max_number + 1:03d}"
-    )
+    return f"person_{max_number + 1:03d}"
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +257,7 @@ def get_or_create_observed_person(
     display_name,
 ):
 
-    display_name = display_name.strip()
+    display_name = str(display_name).strip()
 
     if not display_name:
         raise ValueError(
@@ -281,10 +288,7 @@ def get_or_create_observed_person(
 
         db.commit()
 
-        return (
-            person,
-            False,
-        )
+        return person, False
 
     # ---------------------------------------------------------
     # 2. Alias
@@ -316,14 +320,10 @@ def get_or_create_observed_person(
 
         print(
             f"[identity] 알려진 인물 별칭 매칭: "
-            f"{display_name} -> "
-            f"{person.person_key}"
+            f"{display_name} -> {person.person_key}"
         )
 
-        return (
-            person,
-            False,
-        )
+        return person, False
 
     # ---------------------------------------------------------
     # 3. 처음 보는 사람
@@ -341,9 +341,7 @@ def get_or_create_observed_person(
     )
 
     db.add(person)
-
     db.commit()
-
     db.refresh(person)
 
     db.add(
@@ -369,14 +367,10 @@ def get_or_create_observed_person(
 
     print(
         f"[identity] 새로운 사람 등록: "
-        f"{display_name} -> "
-        f"{person_key}"
+        f"{display_name} -> {person_key}"
     )
 
-    return (
-        person,
-        True,
-    )
+    return person, True
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +383,8 @@ def command_name(
     new_name,
 ):
 
-    sender = sender.strip()
-    new_name = new_name.strip()
+    sender = str(sender).strip()
+    new_name = str(new_name).strip()
 
     if not sender:
         return "sender가 없어"
@@ -404,9 +398,7 @@ def command_name(
 
     self_person = (
         db.query(Person)
-        .filter_by(
-            person_key="self"
-        )
+        .filter_by(person_key="self")
         .first()
     )
 
@@ -422,13 +414,11 @@ def command_name(
         )
 
         db.add(self_person)
-
         db.commit()
-
         db.refresh(self_person)
 
     # ---------------------------------------------------------
-    # self 정보 갱신
+    # self 갱신
     # ---------------------------------------------------------
 
     self_person.canonical_name = new_name
@@ -438,7 +428,7 @@ def command_name(
     self_person.observed_in_chat = 1
 
     # ---------------------------------------------------------
-    # 현재 sender Identity 찾기
+    # 현재 sender Identity
     # ---------------------------------------------------------
 
     current_identity = (
@@ -456,14 +446,12 @@ def command_name(
         old_person = current_identity.person
 
     # ---------------------------------------------------------
-    # sender가 다른 Person의 alias로 남아있다면 제거
+    # sender alias 정리
     # ---------------------------------------------------------
 
     sender_aliases = (
         db.query(PersonAlias)
-        .filter_by(
-            alias=sender
-        )
+        .filter_by(alias=sender)
         .all()
     )
 
@@ -480,10 +468,7 @@ def command_name(
 
     if current_identity:
 
-        current_identity.person_id = (
-            self_person.id
-        )
-
+        current_identity.person_id = self_person.id
         current_identity.target_key = "self"
         current_identity.platform = "kakaotalk"
         current_identity.is_primary = 1
@@ -501,7 +486,7 @@ def command_name(
         )
 
     # ---------------------------------------------------------
-    # sender를 self alias로 등록
+    # sender alias
     # ---------------------------------------------------------
 
     sender_alias = (
@@ -525,7 +510,7 @@ def command_name(
         )
 
     # ---------------------------------------------------------
-    # 새 이름도 self alias
+    # 새 이름 alias
     # ---------------------------------------------------------
 
     name_alias = (
@@ -549,7 +534,7 @@ def command_name(
         )
 
     # ---------------------------------------------------------
-    # 기존 자동 생성 Person 정리
+    # 기존 자동 Person 비활성화
     # ---------------------------------------------------------
 
     if (
@@ -565,10 +550,8 @@ def command_name(
         other_alias_count = (
             db.query(PersonAlias)
             .filter(
-                PersonAlias.person_id
-                == old_person.id,
-                PersonAlias.alias
-                != sender,
+                PersonAlias.person_id == old_person.id,
+                PersonAlias.alias != sender,
             )
             .count()
         )
@@ -597,12 +580,8 @@ def command_name_list(db):
 
     persons = (
         db.query(Person)
-        .filter_by(
-            status="active"
-        )
-        .order_by(
-            Person.id.asc()
-        )
+        .filter_by(status="active")
+        .order_by(Person.id.asc())
         .all()
     )
 
@@ -617,12 +596,8 @@ def command_name_list(db):
 
         aliases = (
             db.query(PersonAlias)
-            .filter_by(
-                person_id=person.id
-            )
-            .order_by(
-                PersonAlias.id.asc()
-            )
+            .filter_by(person_id=person.id)
+            .order_by(PersonAlias.id.asc())
             .all()
         )
 
@@ -641,8 +616,7 @@ def command_name_list(db):
             f"{person.person_key} | "
             f"{person.canonical_name} | "
             f"{observed} | "
-            f"별칭: "
-            f"{alias_text or '-'}"
+            f"별칭: {alias_text or '-'}"
         )
 
     return "\n".join(lines)
@@ -657,7 +631,7 @@ def command_name_delete(
     name,
 ):
 
-    name = name.strip()
+    name = str(name).strip()
 
     if not name:
         return "삭제할 이름을 적어줘"
@@ -680,9 +654,7 @@ def command_name_delete(
 
     aliases = (
         db.query(PersonAlias)
-        .filter_by(
-            alias=name
-        )
+        .filter_by(alias=name)
         .all()
     )
 
@@ -692,9 +664,7 @@ def command_name_delete(
         deleted = True
 
     if not deleted:
-        return (
-            f"{name}이라는 이름은 없어"
-        )
+        return f"{name}이라는 이름은 없어"
 
     db.commit()
 
@@ -714,7 +684,7 @@ def command_person(
     aliases,
 ):
 
-    canonical_name = canonical_name.strip()
+    canonical_name = str(canonical_name).strip()
 
     if not canonical_name:
         return "인물 이름을 적어줘"
@@ -730,25 +700,19 @@ def command_person(
 
     else:
 
-        existing_identity = (
-            get_person_by_identity(
-                db,
-                canonical_name,
-            )
+        existing_identity = get_person_by_identity(
+            db,
+            canonical_name,
         )
 
         if existing_identity:
 
-            person = (
-                existing_identity.person
-            )
+            person = existing_identity.person
 
         else:
 
             person = Person(
-                person_key=make_person_key(
-                    db
-                ),
+                person_key=make_person_key(db),
                 canonical_name=canonical_name,
                 person_type="person",
                 status="active",
@@ -757,9 +721,7 @@ def command_person(
             )
 
             db.add(person)
-
             db.commit()
-
             db.refresh(person)
 
     names = [
@@ -768,25 +730,20 @@ def command_person(
 
     for name in names:
 
-        name = name.strip()
+        name = str(name).strip()
 
         if not name:
             continue
 
         existing_alias = (
             db.query(PersonAlias)
-            .filter_by(
-                alias=name
-            )
+            .filter_by(alias=name)
             .first()
         )
 
         if existing_alias:
 
-            if (
-                existing_alias.person_id
-                != person.id
-            ):
+            if existing_alias.person_id != person.id:
 
                 return (
                     f"{name}은 이미 "
@@ -826,6 +783,8 @@ def command_person_delete(
     name,
 ):
 
+    name = str(name).strip()
+
     person = get_person_by_alias(
         db,
         name,
@@ -847,9 +806,7 @@ def command_person_delete(
 
     identities = (
         db.query(Identity)
-        .filter_by(
-            person_id=person.id
-        )
+        .filter_by(person_id=person.id)
         .all()
     )
 
@@ -886,23 +843,17 @@ def command_person_merge(
     )
 
     if not old_person:
-        return (
-            f"{old_name}을 못 찾겠어"
-        )
+        return f"{old_name}을 못 찾겠어"
 
     if not target_person:
-        return (
-            f"{target_name}을 못 찾겠어"
-        )
+        return f"{target_name}을 못 찾겠어"
 
     if old_person.id == target_person.id:
         return "이미 같은 사람이야"
 
     aliases = (
         db.query(PersonAlias)
-        .filter_by(
-            person_id=old_person.id
-        )
+        .filter_by(person_id=old_person.id)
         .all()
     )
 
@@ -911,45 +862,32 @@ def command_person_merge(
         duplicate = (
             db.query(PersonAlias)
             .filter(
-                PersonAlias.alias
-                == alias.alias,
-                PersonAlias.person_id
-                == target_person.id,
+                PersonAlias.alias == alias.alias,
+                PersonAlias.person_id == target_person.id,
             )
             .first()
         )
 
         if duplicate:
             db.delete(alias)
-
         else:
-            alias.person_id = (
-                target_person.id
-            )
+            alias.person_id = target_person.id
 
     identities = (
         db.query(Identity)
-        .filter_by(
-            person_id=old_person.id
-        )
+        .filter_by(person_id=old_person.id)
         .all()
     )
 
     for identity in identities:
 
-        identity.person_id = (
-            target_person.id
-        )
-
-        identity.target_key = (
-            target_person.person_key
-        )
+        identity.person_id = target_person.id
+        identity.target_key = target_person.person_key
 
     old_person.status = "merged"
 
     old_person.notes = (
-        f"merged_into="
-        f"{target_person.person_key}"
+        f"merged_into={target_person.person_key}"
     )
 
     target_person.confirmed = 1
@@ -1004,148 +942,93 @@ def log_conversation(
 
 
 # ---------------------------------------------------------------------------
-# 명령어 판별
-# ---------------------------------------------------------------------------
-#
-# 중요:
-# "/이름목록" 같은 실제 명령어만 제외한다.
-#
-# 문장 중간에 "/"가 들어간 것은 정상 발화로 취급한다.
-#
-# 예:
-#   /이름목록          -> 명령어
-#   /기억목록          -> 명령어
-#   이거 / 저거        -> 정상 발화
-#   오늘 / 내일        -> 정상 발화
-#   /말투 안녕         -> 명령어
-#
+# 명령어 판정
 # ---------------------------------------------------------------------------
 
-def is_learning_excluded_command(
-    text,
-):
-    """
-    말투/장기기억 학습에서 제외해야 하는
-    봇 명령어인지 판별한다.
+COMMAND_PREFIXES = (
+    "/이름",
+    "/인물",
+    "/기억",
+    "/말투",
+    "/리셋",
+    "/초기화",
+)
 
-    명령어 처리 자체와 별개로
-    과거 DB의 명령어도 걸러내기 위해 사용한다.
-    """
+
+def is_command(text):
+
+    text = str(text).strip()
 
     if not text:
         return False
 
-    value = str(text).strip()
-
-    if not value.startswith("/"):
-        return False
-
-    exact_commands = {
-        "/이름목록",
-        "/이름 목록",
-        "/인물목록",
-        "/인물 목록",
-        "/기억목록",
-        "/기억 목록",
-        "/기억리스트",
-        "/리셋",
-        "/초기화",
-    }
-
-    if value in exact_commands:
+    if text.startswith(COMMAND_PREFIXES):
         return True
-
-    command_prefixes = [
-        "/이름 ",
-        "/이름삭제 ",
-        "/인물 ",
-        "/인물삭제 ",
-        "/인물병합 ",
-        "/기억 ",
-        "/기억삭제 ",
-        "/말투 ",
-    ]
-
-    for prefix in command_prefixes:
-
-        if value.startswith(prefix):
-            return True
 
     return False
 
 
-def filter_learning_history(
-    history,
-):
-    """
-    최근 대화 중 명령어를 제거한다.
+# ---------------------------------------------------------------------------
+# 말투 학습 제외 판정
+# ---------------------------------------------------------------------------
 
-    기존 DB에 과거 명령어가 들어있어도
-    앞으로 말투 학습에 섞이지 않게 한다.
-    """
+def should_learn_style(text):
 
-    if not history:
-        return []
+    if not text:
+        return False
 
-    filtered = []
+    text = str(text).strip()
 
-    for item in history:
+    if len(text) < 2:
+        return False
 
-        try:
+    # ---------------------------------------------------------
+    # 모든 slash 명령어 차단
+    # ---------------------------------------------------------
 
-            sender, text = item
+    if is_command(text):
+        return False
 
-        except Exception:
+    # ---------------------------------------------------------
+    # 멘션이 들어간 형태도 차단
+    # ---------------------------------------------------------
 
-            continue
+    if (
+        "@짭태양" in text
+        or "/짭태양" in text
+    ):
+        return False
 
-        if is_learning_excluded_command(
-            text
+    # ---------------------------------------------------------
+    # 단순 반응은 학습 가치가 낮음
+    # ---------------------------------------------------------
+
+    skip_patterns = [
+        r"^ㅋㅋ+$",
+        r"^ㅋ+$",
+        r"^ㅎㅎ+$",
+        r"^ㅎ+$",
+        r"^ㅇㅇ+$",
+        r"^ㄴㄴ+$",
+        r"^ㅇㅋ+$",
+        r"^오+$",
+        r"^아+$",
+        r"^헐+$",
+        r"^뭐함\??$",
+        r"^뭐해\??$",
+        r"^자냐\??$",
+    ]
+
+    for pattern in skip_patterns:
+
+        if re.fullmatch(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
         ):
-            continue
+            return False
 
-        filtered.append(
-            (
-                sender,
-                text,
-            )
-        )
-
-    return filtered
-
-
-def filter_style_examples(
-    examples,
-):
-    """
-    기존 style_samples.txt / legacy DB에
-    명령어가 들어있더라도 모델에게 넘기지 않는다.
-    """
-
-    if not examples:
-        return []
-
-    filtered = []
-
-    for example in examples:
-
-        text = str(
-            example
-        ).strip()
-
-        if not text:
-            continue
-
-        if is_learning_excluded_command(
-            text
-        ):
-            continue
-
-        filtered.append(
-            text
-        )
-
-    return filtered
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1155,14 +1038,17 @@ def filter_style_examples(
 STYLE_RULES = """
 [문장 형식]
 1. 카카오톡처럼 자연스럽게 말한다.
-2. 무조건 짧게 만들지 않는다.
+2. 너무 길게 늘어뜨리지 않는다.
 3. 단순한 질문은 짧게 답한다.
-4. 생각이 필요한 질문은 충분히 생각한 뒤 답한다.
-5. 필요한 경우 여러 문장으로 설명한다.
+4. 생각이 필요한 질문은 필요한 만큼 충분히 답한다.
+5. 한 문장으로 끝낼 수 있으면 한 문장으로 끝낸다.
 6. 설명문이나 고객센터 답변처럼 말하지 않는다.
 7. 질문의 난이도에 맞춰 답변 길이를 조절한다.
-8. 모델이 답변을 생성하다가 토큰 제한으로 중간에서 잘린 것처럼 보이는 답변은 만들지 않는다.
-9. 답변을 실제로 끝낼 때는 자연스럽게 끝낸다.
+8. 말을 짧게 하는 것과 문장을 강제로 끊는 것은 다르다.
+9. 답변을 완성하기 전에 출력하지 않는다.
+10. 문장이 끝나지 않은 상태에서 임의로 끊지 않는다.
+11. 내용이 끝났으면 그때 답변을 끝낸다.
+12. 여러 문장이 필요하면 자연스럽게 여러 문장으로 답한다.
 
 [말투]
 1. 반말.
@@ -1172,17 +1058,15 @@ STYLE_RULES = """
 5. ㅋㅋㅋ / ㅋㅎㅋㅎ / ㅡㅡ / ㅎ;; 같은 표현은 상황에 맞을 때만 사용한다.
 6. 문장부호는 최소화한다.
 7. 긍정할 때 무조건 ㅇㅇ만 반복하지 않는다.
-8. 실제 카톡에서 사람이 쓸 법한 불완전한 표현을 허용한다.
+8. 실제 카톡에서 사람이 쓸 법한 불완전한 문장은 허용한다.
 9. 억지로 웃기려고 하지 않는다.
-10. 상대가 진지한 질문을 하면 말투는 자연스럽게 유지하되 내용은 정확하게 답한다.
+10. 진지한 질문에는 내용은 정확하게 답한다.
 
-[중요]
-1. "짧게 말한다"와 "답변이 잘린다"는 전혀 다른 것이다.
-2. 답변을 중간에서 끊어서 미완성으로 보내지 않는다.
-3. "근데 이건.."처럼 자연스러운 말투 표현은 사용할 수 있지만,
-   모델 출력이 토큰 제한 때문에 잘린 것처럼 끝내지는 않는다.
-4. 충분히 생각할 필요가 있는 질문은 생각할 시간을 사용해서 답한다.
-5. 생각한 결과를 무조건 장황하게 설명하지 않는다.
+[매우 중요]
+- "짧게 답한다"는 답변을 중간에서 잘라 보내라는 뜻이 아니다.
+- 문장을 만들다가 갑자기 끊어서 보내지 않는다.
+- 반드시 하나의 완결된 응답을 만든 다음 전송한다.
+- 필요하면 짧게 끝내고, 필요하면 여러 문장으로 충분히 답한다.
 
 [금지]
 1. "무엇을 도와드릴까요?"
@@ -1190,12 +1074,13 @@ STYLE_RULES = """
 3. "좋은 하루 보내세요"
 4. AI/시스템/프롬프트/모델이라는 말을 먼저 꺼내지 않는다.
 5. 자신을 챗봇이라고 설명하지 않는다.
-6. 사용자의 명령어를 말투 특징으로 따라 하지 않는다.
+6. 슬래시 명령어를 일반적인 말투처럼 따라하지 않는다.
+7. "/이름", "/기억", "/말투", "/리셋" 등의 명령 형식을 대화 말투로 흉내내지 않는다.
 """
 
 
 SYSTEM_INSTRUCTION_FOR_SELF = f"""
-너는 실제 인물의 말투와 성향을 학습하는 AI 페르소나 '짭태양'이다.
+너는 실제 인물 이태양의 말투와 성향을 학습하는 AI 클론 '짭태양'이다.
 
 현재 상대는 페르소나의 실제 본인이다.
 
@@ -1207,14 +1092,7 @@ SYSTEM_INSTRUCTION_FOR_SELF = f"""
 이미 알고 있는 사실과 새로 알려진 사실을 구분한다.
 모르는 내용은 아는 척하지 않는다.
 
-질문이 단순하면 짧게 답하고,
-생각이 필요한 질문은 충분히 생각한 뒤 답한다.
-
-실제 말투 예시에서 나타나는 표현 방식,
-어미, 말버릇, 문장 길이, 줄임말 등을 참고한다.
-
-단, /이름목록 /기억목록 /이름삭제 같은
-봇 명령어는 사용자의 말투 특징으로 취급하지 않는다.
+상대가 말한 내용을 그대로 복붙해서 되풀이하지 않는다.
 
 {STYLE_RULES}
 """
@@ -1223,14 +1101,14 @@ SYSTEM_INSTRUCTION_FOR_SELF = f"""
 SYSTEM_INSTRUCTION_FOR_CHA = f"""
 너는 21살 대학생 이태양의 AI 페르소나다.
 
-상대는 친한 게임 친구다.
-친밀도가 높은 친구처럼 자연스럽게 카카오톡으로 대화한다.
+상대는 친한 게임 친구 챠다.
+챠와는 친밀도가 높은 친구처럼 자연스럽게 카카오톡으로 대화한다.
 
+챠의 이름이나 별칭을 임의로 바꾸지 않는다.
 기억에 없는 사실은 아는 척하지 않는다.
-상대가 알려준 사실과 페르소나 기억을 자연스럽게 활용한다.
 
-질문이 단순하면 짧게 답하고,
-생각이 필요한 질문은 필요한 만큼 충분히 생각한다.
+답변은 자연스럽게 짧을 수 있지만
+문장을 만들다가 중간에서 강제로 끊지 않는다.
 
 {STYLE_RULES}
 """
@@ -1244,8 +1122,8 @@ SYSTEM_INSTRUCTION_FOR_UNKNOWN = f"""
 
 상대에 대한 기억이 없으면 아는 척하지 않는다.
 
-질문이 단순하면 짧게 답하고,
-생각이 필요한 질문은 필요한 만큼 충분히 생각한다.
+답변은 필요한 만큼만 한다.
+짧게 말하되 문장을 중간에서 잘라 보내지 않는다.
 
 {STYLE_RULES}
 """
@@ -1264,16 +1142,12 @@ MEMORY_CATEGORIES = {
 }
 
 
-def normalize_memory_category(
-    category,
-):
+def normalize_memory_category(category):
 
     if not category:
         return "기타"
 
-    category = str(
-        category
-    ).strip()
+    category = str(category).strip()
 
     for key in MEMORY_CATEGORIES:
 
@@ -1306,25 +1180,17 @@ def make_categorized_memory(
         category
     )
 
-    memory = str(
-        memory
-    ).strip()
+    memory = str(memory).strip()
 
     if not memory:
         return ""
 
-    return (
-        f"[{category}] {memory}"
-    )
+    return f"[{category}] {memory}"
 
 
-def parse_memory_category(
-    memory,
-):
+def parse_memory_category(memory):
 
-    text = str(
-        memory
-    ).strip()
+    text = str(memory).strip()
 
     match = re.match(
         r"^\[(취향|사람|관계|사실|기타)\]\s*(.*)$",
@@ -1338,22 +1204,15 @@ def parse_memory_category(
             match.group(2).strip(),
         )
 
-    return (
-        "기타",
-        text,
-    )
+    return "기타", text
 
 
-def clean_json_text(
-    text,
-):
+def clean_json_text(text):
 
     if not text:
         return ""
 
-    text = str(
-        text
-    ).strip()
+    text = str(text).strip()
 
     text = re.sub(
         r"^```(?:json)?\s*",
@@ -1371,22 +1230,16 @@ def clean_json_text(
     return text.strip()
 
 
-def parse_memory_judgement(
-    text,
-):
+def parse_memory_judgement(text):
 
     if not text:
         return None
 
-    cleaned = clean_json_text(
-        text
-    )
+    cleaned = clean_json_text(text)
 
     try:
 
-        data = json.loads(
-            cleaned
-        )
+        data = json.loads(cleaned)
 
     except Exception:
 
@@ -1409,10 +1262,7 @@ def parse_memory_judgement(
 
             return None
 
-    if not isinstance(
-        data,
-        dict,
-    ):
+    if not isinstance(data, dict):
         return None
 
     save_value = data.get(
@@ -1420,10 +1270,7 @@ def parse_memory_judgement(
         False,
     )
 
-    if isinstance(
-        save_value,
-        str,
-    ):
+    if isinstance(save_value, str):
 
         save_value = (
             save_value.strip().lower()
@@ -1439,9 +1286,7 @@ def parse_memory_judgement(
 
     else:
 
-        save_value = bool(
-            save_value
-        )
+        save_value = bool(save_value)
 
     if not save_value:
         return {
@@ -1453,10 +1298,7 @@ def parse_memory_judgement(
     )
 
     memory = str(
-        data.get(
-            "memory",
-            "",
-        )
+        data.get("memory", "")
     ).strip()
 
     if not memory:
@@ -1465,10 +1307,7 @@ def parse_memory_judgement(
         }
 
     if len(memory) > 300:
-        memory = (
-            memory[:300]
-            .rstrip()
-        )
+        memory = memory[:300].rstrip()
 
     return {
         "save": True,
@@ -1486,40 +1325,13 @@ def judge_long_term_memory(
     if not user_input:
         return None
 
-    if is_learning_excluded_command(
-        user_input
-    ):
+    user_input = str(user_input).strip()
+
+    if len(user_input) < 4:
         return None
 
-    if len(
-        user_input.strip()
-    ) < 4:
+    if is_command(user_input):
         return None
-
-    skip_patterns = [
-        r"^ㅋㅋ+$",
-        r"^ㅋ+$",
-        r"^ㅎㅎ+$",
-        r"^ㅎ+$",
-        r"^ㅇㅇ+$",
-        r"^ㄴㄴ+$",
-        r"^ㅇㅋ+$",
-        r"^오+$",
-        r"^아+$",
-        r"^헐+$",
-        r"^뭐함\??$",
-        r"^뭐해\??$",
-        r"^자냐\??$",
-    ]
-
-    for pattern in skip_patterns:
-
-        if re.match(
-            pattern,
-            user_input.strip(),
-            flags=re.IGNORECASE,
-        ):
-            return None
 
     history_text = ""
 
@@ -1529,9 +1341,7 @@ def judge_long_term_memory(
 
         for sender, text in recent_history[-6:]:
 
-            if is_learning_excluded_command(
-                text
-            ):
+            if is_command(text):
                 continue
 
             history_lines.append(
@@ -1546,9 +1356,7 @@ def judge_long_term_memory(
 
     if existing_memories:
 
-        limited_memories = (
-            existing_memories[-30:]
-        )
+        limited_memories = existing_memories[-30:]
 
         memory_text = "\n".join(
             f"- {memory}"
@@ -1560,7 +1368,7 @@ def judge_long_term_memory(
 
 사용자의 현재 발화를 보고
 앞으로도 이 사람을 이해하는 데 도움이 될 만한
-안정적인 정보를 장기기억으로 저장할 가치가 있는지 판단해라.
+안정적인 정보만 장기기억으로 저장할 가치가 있는지 판단해라.
 
 저장 가치가 높은 예:
 - 사용자가 직접 밝힌 지속적인 취향
@@ -1568,7 +1376,7 @@ def judge_long_term_memory(
 - 본인의 중요한 습관
 - 중요한 인물과 그 사람의 별칭
 - 사람 사이의 지속적인 관계
-- 앞으로도 유용할 개인적인 사실
+- 앞으로도 유용한 개인적인 사실
 - 사용자가 명시적으로 기억해달라고 한 정보
 
 저장하지 않는 예:
@@ -1581,7 +1389,8 @@ def judge_long_term_memory(
 - 지금 대화에서만 필요한 정보
 - AI가 추측해야 하는 정보
 - 근거가 약한 성격 추론
-- 봇 명령어
+- 이미 저장된 내용의 단순 반복
+- 명령어
 
 중요:
 사용자가 직접 말한 사실을 우선한다.
@@ -1595,19 +1404,19 @@ def judge_long_term_memory(
 사실
 기타
 
-저장한다면 memory는 나중에 단독으로 봐도 이해되도록
+memory는 나중에 단독으로 읽어도 이해되도록
 짧고 명확한 한 문장으로 정리한다.
 
 반드시 JSON 하나만 반환한다.
 
-저장할 경우:
+저장:
 {{
   "save": true,
   "category": "취향",
   "memory": "야구를 좋아함"
 }}
 
-저장하지 않을 경우:
+저장하지 않음:
 {{
   "save": false
 }}
@@ -1624,44 +1433,36 @@ def judge_long_term_memory(
 
     try:
 
-        response = (
-            client.models.generate_content(
-                model=MODEL_NAME,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[
-                            types.Part.from_text(
-                                text=prompt
-                            )
-                        ],
-                    )
-                ],
-                config=types.GenerateContentConfig(
-                    thinking_config=(
-                        types.ThinkingConfig(
-                            thinking_level="low"
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(
+                            text=prompt
                         )
-                    ),
-                    max_output_tokens=512,
-                    response_mime_type="application/json",
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="low"
                 ),
-            )
+                max_output_tokens=300,
+                temperature=0.1,
+                response_mime_type="application/json",
+            ),
         )
 
-        result = parse_memory_judgement(
-            response.text
-            if response
-            else ""
+        return parse_memory_judgement(
+            response.text if response else ""
         )
-
-        return result
 
     except Exception as e:
 
         print(
-            f"[memory judge] 실패: "
-            f"{repr(e)}"
+            f"[memory judge] 실패: {repr(e)}"
         )
 
         return None
@@ -1691,28 +1492,19 @@ def save_auto_memory_if_worthy(
     )
 
     memory = str(
-        result.get(
-            "memory",
-            "",
-        )
+        result.get("memory", "")
     ).strip()
 
     if not memory:
         return None
 
-    categorized_memory = (
-        make_categorized_memory(
-            category,
-            memory,
-        )
+    categorized_memory = make_categorized_memory(
+        category,
+        memory,
     )
 
     if not categorized_memory:
         return None
-
-    # ---------------------------------------------------------
-    # 중복 방지
-    # ---------------------------------------------------------
 
     try:
 
@@ -1728,26 +1520,18 @@ def save_auto_memory_if_worthy(
 
         for old_memory in existing:
 
-            old_category, old_text = (
-                parse_memory_category(
-                    old_memory
-                )
+            _, old_text = parse_memory_category(
+                old_memory
             )
 
-            old_normalized = (
-                old_text.strip().lower()
-            )
+            old_text = old_text.strip().lower()
 
-            if (
-                old_normalized
-                == normalized_new
-            ):
+            if old_text == normalized_new:
                 return None
 
             if (
                 len(normalized_new) >= 8
-                and normalized_new
-                in old_normalized
+                and normalized_new in old_text
             ):
                 return None
 
@@ -1757,10 +1541,6 @@ def save_auto_memory_if_worthy(
             f"[memory duplicate check] "
             f"실패: {repr(e)}"
         )
-
-    # ---------------------------------------------------------
-    # 실제 저장
-    # ---------------------------------------------------------
 
     try:
 
@@ -1782,16 +1562,85 @@ def save_auto_memory_if_worthy(
     except Exception as e:
 
         print(
-            f"[memory save] 실패: "
-            f"{repr(e)}"
+            f"[memory save] 실패: {repr(e)}"
         )
 
         return None
 
 
-def format_memory_list(
-    rows,
+# ---------------------------------------------------------------------------
+# 백그라운드 학습
+# ---------------------------------------------------------------------------
+
+def background_learning(
+    conversation_key,
+    user_input,
+    recent_history,
+    existing_memories,
+    is_self,
 ):
+
+    """
+    사용자의 응답을 먼저 보내고
+    그 다음 장기기억/말투 학습을 처리한다.
+
+    따라서 Gemini 장기기억 판정 때문에
+    카톡 응답이 늦어지는 것을 줄인다.
+    """
+
+    if not is_self:
+        return
+
+    # ---------------------------------------------------------
+    # 말투 학습
+    # ---------------------------------------------------------
+
+    if should_learn_style(user_input):
+
+        try:
+
+            legacy.save_style_sample(
+                user_input
+            )
+
+            print(
+                f"[style] 자동 학습: "
+                f"{user_input}"
+            )
+
+        except Exception as e:
+
+            print(
+                f"[style auto save] 실패: "
+                f"{repr(e)}"
+            )
+
+    # ---------------------------------------------------------
+    # 장기기억
+    # ---------------------------------------------------------
+
+    try:
+
+        save_auto_memory_if_worthy(
+            conversation_key=conversation_key,
+            user_input=user_input,
+            recent_history=recent_history,
+            existing_memories=existing_memories,
+        )
+
+    except Exception as e:
+
+        print(
+            f"[auto memory] 전체 실패: "
+            f"{repr(e)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 기억 목록
+# ---------------------------------------------------------------------------
+
+def format_memory_list(rows):
 
     if not rows:
         return "기억된 정보가 없어"
@@ -1809,18 +1658,14 @@ def format_memory_list(
         try:
 
             memory_id = row[0]
-            raw_memory = str(
-                row[1]
-            ).strip()
+            raw_memory = str(row[1]).strip()
 
         except Exception:
 
             continue
 
-        category, text = (
-            parse_memory_category(
-                raw_memory
-            )
+        category, text = parse_memory_category(
+            raw_memory
         )
 
         grouped.setdefault(
@@ -1854,13 +1699,9 @@ def format_memory_list(
             f"\n<{category}>"
         )
 
-        lines.extend(
-            items
-        )
+        lines.extend(items)
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1886,17 +1727,21 @@ def handle_command(
 
     try:
 
+        # -----------------------------------------------------
         # /이름목록
+        # -----------------------------------------------------
+
         if user_input in [
             "/이름목록",
             "/이름 목록",
         ]:
 
-            return command_name_list(
-                db
-            )
+            return command_name_list(db)
 
-        # /이름삭제 이름
+        # -----------------------------------------------------
+        # /이름삭제
+        # -----------------------------------------------------
+
         if user_input.startswith(
             "/이름삭제 "
         ):
@@ -1910,7 +1755,10 @@ def handle_command(
                 name,
             )
 
-        # /이름 이름
+        # -----------------------------------------------------
+        # /이름
+        # -----------------------------------------------------
+
         if user_input.startswith(
             "/이름 "
         ):
@@ -1925,17 +1773,21 @@ def handle_command(
                 name,
             )
 
+        # -----------------------------------------------------
         # /인물목록
+        # -----------------------------------------------------
+
         if user_input in [
             "/인물목록",
             "/인물 목록",
         ]:
 
-            return command_name_list(
-                db
-            )
+            return command_name_list(db)
 
+        # -----------------------------------------------------
         # /인물삭제
+        # -----------------------------------------------------
+
         if user_input.startswith(
             "/인물삭제 "
         ):
@@ -1949,7 +1801,10 @@ def handle_command(
                 name,
             )
 
+        # -----------------------------------------------------
         # /인물병합
+        # -----------------------------------------------------
+
         if user_input.startswith(
             "/인물병합 "
         ):
@@ -1971,7 +1826,10 @@ def handle_command(
                 args[1],
             )
 
+        # -----------------------------------------------------
         # /인물
+        # -----------------------------------------------------
+
         if user_input.startswith(
             "/인물 "
         ):
@@ -1981,6 +1839,7 @@ def handle_command(
             ].split()
 
             if not args:
+
                 return (
                     "예: /인물 백호 배코"
                 )
@@ -2021,9 +1880,10 @@ def health_check():
 @app.post("/chat")
 def reply_chat(
     req: ChatRequest,
+    background_tasks: BackgroundTasks,
 ):
 
-    raw_input = req.message.strip()
+    raw_input = str(req.message).strip()
 
     if not raw_input:
 
@@ -2049,80 +1909,34 @@ def reply_chat(
         }
 
     # ---------------------------------------------------------
-    # Command
+    # 리셋
     #
-    # 명령어는 여기서 바로 반환한다.
-    # 따라서 일반 대화 / 말투 학습 / 장기기억 학습에
-    # 들어가지 않는다.
-    # ---------------------------------------------------------
-
-    command_reply = handle_command(
-        req.sender,
-        user_input,
-    )
-
-    if command_reply is not None:
-
-        return {
-            "reply": command_reply
-        }
-
-    # ---------------------------------------------------------
-    # Person 확인
-    # ---------------------------------------------------------
-
-    db = SessionLocal()
-
-    try:
-
-        person, is_new_person = (
-            get_or_create_observed_person(
-                db,
-                req.sender,
-            )
-        )
-
-        target_key = (
-            person.person_key
-        )
-
-    except Exception as e:
-
-        print(
-            f"[person] 처리 실패: "
-            f"{repr(e)}"
-        )
-
-        return {
-            "reply":
-                "사람 연결하는데 오류남;;"
-        }
-
-    finally:
-
-        db.close()
-
-    # ---------------------------------------------------------
-    # 원본 신규 DB 대화 기록
-    # ---------------------------------------------------------
-
-    log_conversation(
-        speaker_name=req.sender,
-        target_key=target_key,
-        message=req.message,
-        room_id="dm",
-    )
-
-    conversation_key = target_key
-
-    # ---------------------------------------------------------
-    # Reset
+    # 사람 등록보다 먼저 처리
     # ---------------------------------------------------------
 
     if user_input in [
         "/리셋",
         "/초기화",
     ]:
+
+        db = SessionLocal()
+
+        try:
+
+            person = get_person_by_alias(
+                db,
+                req.sender,
+            )
+
+            if person:
+                conversation_key = person.person_key
+
+            else:
+                conversation_key = req.sender
+
+        finally:
+
+            db.close()
 
         try:
 
@@ -2160,6 +1974,66 @@ def reply_chat(
             }
 
     # ---------------------------------------------------------
+    # Command
+    # ---------------------------------------------------------
+
+    command_reply = handle_command(
+        req.sender,
+        user_input,
+    )
+
+    if command_reply is not None:
+
+        return {
+            "reply": command_reply
+        }
+
+    # ---------------------------------------------------------
+    # Person 확인
+    # ---------------------------------------------------------
+
+    db = SessionLocal()
+
+    try:
+
+        person, is_new_person = (
+            get_or_create_observed_person(
+                db,
+                req.sender,
+            )
+        )
+
+        target_key = person.person_key
+
+    except Exception as e:
+
+        print(
+            f"[person] 처리 실패: {repr(e)}"
+        )
+
+        return {
+            "reply":
+                "사람 연결하는데 오류남;;"
+        }
+
+    finally:
+
+        db.close()
+
+    # ---------------------------------------------------------
+    # 원본 신규 DB 대화 기록
+    # ---------------------------------------------------------
+
+    log_conversation(
+        speaker_name=req.sender,
+        target_key=target_key,
+        message=req.message,
+        room_id="dm",
+    )
+
+    conversation_key = target_key
+
+    # ---------------------------------------------------------
     # 기억 목록
     # ---------------------------------------------------------
 
@@ -2171,17 +2045,13 @@ def reply_chat(
 
         try:
 
-            rows = (
-                legacy.get_memories_with_id(
-                    conversation_key
-                )
+            rows = legacy.get_memories_with_id(
+                conversation_key
             )
 
             return {
                 "reply":
-                    format_memory_list(
-                        rows
-                    )
+                    format_memory_list(rows)
             }
 
         except Exception as e:
@@ -2316,9 +2186,13 @@ def reply_chat(
 
             try:
 
-                legacy.save_style_sample(
-                    style_text
-                )
+                # 명령어 자체는 저장하지 않음.
+                # /말투 뒤의 실제 내용만 저장.
+                if should_learn_style(style_text):
+
+                    legacy.save_style_sample(
+                        style_text
+                    )
 
                 return {
                     "reply":
@@ -2329,8 +2203,7 @@ def reply_chat(
             except Exception as e:
 
                 print(
-                    f"[style] 실패: "
-                    f"{repr(e)}"
+                    f"[style] 실패: {repr(e)}"
                 )
 
                 return {
@@ -2355,9 +2228,7 @@ def reply_chat(
     # 시간
     # ---------------------------------------------------------
 
-    now_kst = datetime.now(
-        KST
-    )
+    now_kst = datetime.now(KST)
 
     current_time_str = (
         now_kst.strftime(
@@ -2367,29 +2238,15 @@ def reply_chat(
 
     # ---------------------------------------------------------
     # 최근 대화
-    #
-    # 명령어가 과거 DB에 남아 있더라도
-    # 모델의 학습/맥락에서는 제외한다.
     # ---------------------------------------------------------
 
     try:
 
-        recent_history_raw = (
+        recent_history = (
             legacy.get_recent_messages(
                 conversation_key,
-                limit=12,
+                limit=8,
             )
-        )
-
-        recent_history = (
-            filter_learning_history(
-                recent_history_raw
-            )
-        )
-
-        # 너무 길어지지 않게 최종 8개만 사용
-        recent_history = (
-            recent_history[-8:]
         )
 
     except Exception as e:
@@ -2415,8 +2272,7 @@ def reply_chat(
     except Exception as e:
 
         print(
-            f"[memory load] 실패: "
-            f"{repr(e)}"
+            f"[memory load] 실패: {repr(e)}"
         )
 
         user_memories = []
@@ -2427,108 +2283,31 @@ def reply_chat(
 
     try:
 
-        style_examples_raw = (
+        style_examples = (
             legacy.get_relevant_style_samples(
                 user_input,
-                n=20,
+                n=12,
             )
         )
 
-        style_examples = (
-            filter_style_examples(
-                style_examples_raw
+        # 안전장치:
+        # 혹시 예전 DB에 명령어가 이미 들어가 있어도
+        # Gemini context에는 넣지 않는다.
+        style_examples = [
+            str(example).strip()
+            for example in style_examples
+            if should_learn_style(
+                str(example).strip()
             )
-        )
-
-        # 최종적으로 10개만 모델에 전달
-        style_examples = (
-            style_examples[-10:]
-        )
+        ]
 
     except Exception as e:
 
         print(
-            f"[style load] 실패: "
-            f"{repr(e)}"
+            f"[style load] 실패: {repr(e)}"
         )
 
         style_examples = []
-
-    # ---------------------------------------------------------
-    # 장기기억 자동 선별
-    #
-    # self가 말한 경우에만 자동 저장.
-    # 명령어는 위에서 이미 return됐지만
-    # 이중으로 방어한다.
-    # ---------------------------------------------------------
-
-    if (
-        is_self
-        and not is_learning_excluded_command(
-            user_input
-        )
-    ):
-
-        try:
-
-            saved_memory = (
-                save_auto_memory_if_worthy(
-                    conversation_key=conversation_key,
-                    user_input=user_input,
-                    recent_history=recent_history,
-                    existing_memories=user_memories,
-                )
-            )
-
-            if saved_memory:
-
-                user_memories = (
-                    list(user_memories)
-                    + [
-                        make_categorized_memory(
-                            saved_memory[
-                                "category"
-                            ],
-                            saved_memory[
-                                "memory"
-                            ],
-                        )
-                    ]
-                )
-
-        except Exception as e:
-
-            print(
-                f"[auto memory] 전체 실패: "
-                f"{repr(e)}"
-            )
-
-    # ---------------------------------------------------------
-    # 본인이 직접 한 말이면 말투 학습
-    #
-    # 명령어는 절대 저장하지 않는다.
-    # ---------------------------------------------------------
-
-    if (
-        is_self
-        and user_input
-        and not is_learning_excluded_command(
-            user_input
-        )
-    ):
-
-        try:
-
-            legacy.save_style_sample(
-                user_input
-            )
-
-        except Exception as e:
-
-            print(
-                f"[style auto save] 실패: "
-                f"{repr(e)}"
-            )
 
     # ---------------------------------------------------------
     # System instruction
@@ -2570,12 +2349,8 @@ def reply_chat(
 
         known_people = (
             db.query(Person)
-            .filter_by(
-                status="active"
-            )
-            .order_by(
-                Person.id.asc()
-            )
+            .filter_by(status="active")
+            .order_by(Person.id.asc())
             .limit(100)
             .all()
         )
@@ -2607,8 +2382,7 @@ def reply_chat(
     except Exception as e:
 
         print(
-            f"[known people] 실패: "
-            f"{repr(e)}"
+            f"[known people] 실패: {repr(e)}"
         )
 
     finally:
@@ -2622,25 +2396,21 @@ def reply_chat(
     contents = []
 
     context_parts = [
-        f"[현재 한국 시각]: "
-        f"{current_time_str}",
+        f"[현재 한국 시각]: {current_time_str}",
     ]
 
     if person:
 
         context_parts.append(
             f"[현재 상대]: "
-            f"{person.canonical_name} "
-            f"/ {target_key}"
+            f"{person.canonical_name} / {target_key}"
         )
 
     if people_lines:
 
         context_parts.append(
             "[알고 있는 인물 목록]\n"
-            + "\n".join(
-                people_lines
-            )
+            + "\n".join(people_lines)
         )
 
     if user_memories:
@@ -2657,15 +2427,11 @@ def reply_chat(
 
         context_parts.append(
             "[실제 말투 예시]\n"
-            + " / ".join(
-                str(example)
+            + "\n".join(
+                f"- {example}"
                 for example in style_examples
             )
         )
-
-    # ---------------------------------------------------------
-    # Context
-    # ---------------------------------------------------------
 
     contents.append(
         types.Content(
@@ -2693,12 +2459,23 @@ def reply_chat(
 
     # ---------------------------------------------------------
     # 최근 대화
+    #
+    # 명령어가 혹시 예전 legacy DB에 들어가 있어도
+    # Gemini 대화 context에서는 제외.
     # ---------------------------------------------------------
 
     for (
         history_sender,
         text,
     ) in recent_history:
+
+        text = str(text).strip()
+
+        if not text:
+            continue
+
+        if is_command(text):
+            continue
 
         role = (
             "model"
@@ -2711,7 +2488,7 @@ def reply_chat(
                 role=role,
                 parts=[
                     types.Part.from_text(
-                        text=str(text)
+                        text=text
                     )
                 ],
             )
@@ -2738,30 +2515,20 @@ def reply_chat(
 
     try:
 
-        response = (
-            client.models.generate_content(
-                model=MODEL_NAME,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        system_instruction
-                    ),
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
 
-                    # 충분히 생각할 수 있게 유지
-                    thinking_config=(
-                        types.ThinkingConfig(
-                            thinking_level="medium"
-                        )
-                    ),
-
-                    # 기존 300 -> 2048
-                    #
-                    # 짧은 카톡은 여전히 짧게 나오고
-                    # 생각이 필요한 답변이 토큰 제한 때문에
-                    # 중간에서 잘릴 가능성을 크게 낮춘다.
-                    max_output_tokens=2048,
+                # 답변이 중간에 끊기는 것을 줄임.
+                # 300 -> 1200
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="medium"
                 ),
-            )
+
+                max_output_tokens=1200,
+            ),
         )
 
         raw_reply = ""
@@ -2769,12 +2536,14 @@ def reply_chat(
         if response:
 
             try:
+
                 raw_reply = (
                     response.text
                     or ""
                 )
 
             except Exception:
+
                 raw_reply = ""
 
         reply = (
@@ -2784,7 +2553,24 @@ def reply_chat(
         )
 
         # -----------------------------------------------------
-        # 모델이 실수로 코드블록 형태로 답한 경우
+        # 모델이 markdown code fence를 뱉으면 제거
+        # -----------------------------------------------------
+
+        reply = re.sub(
+            r"^```(?:text)?\s*",
+            "",
+            reply,
+            flags=re.IGNORECASE,
+        )
+
+        reply = re.sub(
+            r"\s*```$",
+            "",
+            reply,
+        ).strip()
+
+        # -----------------------------------------------------
+        # 혹시 모델이 내부적으로 명령어 형식을 출력한 경우
         # -----------------------------------------------------
 
         if reply.startswith(
@@ -2792,7 +2578,7 @@ def reply_chat(
         ):
 
             reply = re.sub(
-                r"^```[^\n]*\n",
+                r"^```.*?\n",
                 "",
                 reply,
                 flags=re.DOTALL,
@@ -2858,6 +2644,34 @@ def reply_chat(
         message=reply,
         room_id="dm",
     )
+
+    # ---------------------------------------------------------
+    # 중요:
+    # 학습은 응답을 만든 뒤 백그라운드에서 처리
+    #
+    # 그래서
+    #
+    # 사용자 입력
+    #     ↓
+    # Gemini 답변
+    #     ↓
+    # 즉시 카톡 응답
+    #     ↓
+    # 장기기억/말투 학습
+    #
+    # 순서가 됨.
+    # ---------------------------------------------------------
+
+    if is_self:
+
+        background_tasks.add_task(
+            background_learning,
+            conversation_key,
+            user_input,
+            recent_history,
+            user_memories,
+            is_self,
+        )
 
     return {
         "reply": reply
