@@ -1,5 +1,6 @@
 import sqlite3
 import re
+import base64
 from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -66,10 +67,13 @@ SYSTEM_INSTRUCTION = f"""
 {STYLE_RULES}
 """
 
+# [수정] 텍스트 외에 이미지(Base64)와 MIME 타입을 함께 받을 수 있도록 필드 추가
 class ChatRequest(BaseModel):
     sender: str
     message: str
     room_members: list[str] = Field(default_factory=list)
+    image_base64: str | None = None  # Base64로 인코딩된 이미지 데이터
+    mime_type: str | None = "image/jpeg" # 이미지 형식 (예: image/jpeg, image/png 등)
 
 @app.get("/")
 def health_check():
@@ -79,11 +83,18 @@ def health_check():
 def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
     raw_input = str(req.message or "").strip()
     sender = str(req.sender or "").strip()
-    if not raw_input: return {"reply": "뭐라고"}
-    if not sender: return {"reply": "sender가 없어"}
+    
+    # 메시지가 없고 이미지도 없으면 거절
+    if not raw_input and not req.image_base64: 
+        return {"reply": "뭐라고"}
+    if not sender: 
+        return {"reply": "sender가 없어"}
 
     user_input = raw_input.replace("@짭태양", "").replace("/짭태양", "").strip()
-    if not user_input: return {"reply": "ㅇㅇ"}
+    
+    # 텍스트가 없고 이미지만 온 경우 처리용 기본 텍스트
+    if not user_input and req.image_base64:
+        user_input = "사진"
 
     persona_id = get_persona_id()
     db = SessionLocal()
@@ -109,7 +120,7 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
             return {"reply": "대화기록초기화완료"}
         except Exception: return {"reply": "초기화하다 오류남;;"}
 
-    log_conversation(speaker_name=sender, target_key=target_key, message=req.message, room_id="dm")
+    log_conversation(speaker_name=sender, target_key=target_key, message=req.message if req.message else "[사진 전송]", room_id="dm")
 
     # 기억 목록 / 기억 삭제 / 기억 추가 / 말투 추가 처리
     if user_input in ["/기억목록", "/기억 목록", "/기억리스트"]:
@@ -199,7 +210,31 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
             role="model" if s_id == "self" else "user",
             parts=[types.Part.from_text(text=text if s_id == "self" else f"[{s_name}]: {text}")]
         ))
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=f"[{sender}]: {user_input}")]))
+
+    # [수정] 이미지 데이터가 함께 들어온 경우 Gemini 파트에 바이트 데이터 추가
+    user_parts = []
+    if req.image_base64:
+        try:
+            image_bytes = base64.b64decode(req.image_base64)
+            user_parts.append(
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type=req.mime_type or "image/jpeg"
+                )
+            )
+        except Exception as e:
+            print(f"[Image Decode Error] {repr(e)}")
+
+    user_parts.append(
+        types.Part.from_text(text=f"[{sender}]: {user_input}")
+    )
+
+    contents.append(
+        types.Content(
+            role="user",
+            parts=user_parts
+        )
+    )
 
     try:
         res = client.models.generate_content(
@@ -227,4 +262,3 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
         recent_history, user_memories, is_self, people_lines
     )
     return {"reply": reply}
-
