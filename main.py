@@ -67,13 +67,12 @@ SYSTEM_INSTRUCTION = f"""
 {STYLE_RULES}
 """
 
-# [수정] 텍스트 외에 이미지(Base64)와 MIME 타입을 함께 받을 수 있도록 필드 추가
 class ChatRequest(BaseModel):
     sender: str
     message: str
     room_members: list[str] = Field(default_factory=list)
-    image_base64: str | None = None  # Base64로 인코딩된 이미지 데이터
-    mime_type: str | None = "image/jpeg" # 이미지 형식 (예: image/jpeg, image/png 등)
+    image_base64: str | None = None  # 메신저봇 답글 등을 통해 전달된 이미지 데이터
+    mime_type: str | None = "image/jpeg"
 
 @app.get("/")
 def health_check():
@@ -84,15 +83,12 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
     raw_input = str(req.message or "").strip()
     sender = str(req.sender or "").strip()
     
-    # 메시지가 없고 이미지도 없으면 거절
     if not raw_input and not req.image_base64: 
         return {"reply": "뭐라고"}
     if not sender: 
         return {"reply": "sender가 없어"}
 
     user_input = raw_input.replace("@짭태양", "").replace("/짭태양", "").strip()
-    
-    # 텍스트가 없고 이미지만 온 경우 처리용 기본 텍스트
     if not user_input and req.image_base64:
         user_input = "사진"
 
@@ -211,7 +207,7 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
             parts=[types.Part.from_text(text=text if s_id == "self" else f"[{s_name}]: {text}")]
         ))
 
-    # [수정] 이미지 데이터가 함께 들어온 경우 Gemini 파트에 바이트 데이터 추가
+    # 이미지 데이터가 포함된 경우 멀티모달 파트 구성
     user_parts = []
     if req.image_base64:
         try:
@@ -262,3 +258,4 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
         recent_history, user_memories, is_self, people_lines
     )
     return {"reply": reply}
+```[cite: 15]
