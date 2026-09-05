@@ -253,4 +253,3 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
         recent_history, user_memories, is_self, people_lines
     )
     return {"reply": reply}
-[cite: 15]
