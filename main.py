@@ -71,7 +71,7 @@ class ChatRequest(BaseModel):
     sender: str
     message: str
     room_members: list[str] = Field(default_factory=list)
-    image_base64: str | None = None  # 메신저봇 답글 등을 통해 전달된 이미지 데이터
+    image_base64: str | None = None
     mime_type: str | None = "image/jpeg"
 
 @app.get("/")
@@ -118,7 +118,6 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
 
     log_conversation(speaker_name=sender, target_key=target_key, message=req.message if req.message else "[사진 전송]", room_id="dm")
 
-    # 기억 목록 / 기억 삭제 / 기억 추가 / 말투 추가 처리
     if user_input in ["/기억목록", "/기억 목록", "/기억리스트"]:
         db = SessionLocal()
         try:
@@ -171,14 +170,12 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
             return {"reply": f"응 이것도 배웟어: {style_text}"}
         return {"reply": "배울 말투를 적어줘"}
 
-    # 최근 대화 로드
     db_h = SessionLocal()
     try:
         convs = db_h.query(Conversation).filter(Conversation.persona_id == persona_id).order_by(Conversation.id.desc()).limit(40).all()
         recent_history = [(c.speaker_id, c.speaker_name, c.message) for c in reversed(convs) if c.message and not is_command(c.message)]
     finally: db_h.close()
 
-    # 장기 기억 로드
     db_m = SessionLocal()
     try:
         relevant_mems, mentioned_p = get_memory_context_for_query(db_m, persona_id, target_key, user_input)
@@ -189,7 +186,6 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
     user_memories = [f"[{m.context or '기타'}] [대상: {', '.join(m.people_involved or [])}] {m.content}" for m in relevant_mems]
     style_examples = [str(e).strip() for e in legacy.get_relevant_style_samples(user_input, n=12) if should_learn_style(str(e).strip())]
 
-    # 프롬프트 구성
     now_kst = datetime.now(KST).strftime("%Y년 %m월 %d일 %H시 %M분")
     context_parts = [f"[현재 한국 시각]: {now_kst}", f"[현재 상대]: {person.canonical_name} / {target_key}"]
     if people_lines: context_parts.append("[알고 있는 인물 목록]\n" + "\n".join(people_lines))
@@ -207,7 +203,6 @@ def reply_chat(req: ChatRequest, background_tasks: BackgroundTasks):
             parts=[types.Part.from_text(text=text if s_id == "self" else f"[{s_name}]: {text}")]
         ))
 
-    # 이미지 데이터가 포함된 경우 멀티모달 파트 구성
     user_parts = []
     if req.image_base64:
         try:
